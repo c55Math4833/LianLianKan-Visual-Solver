@@ -54,7 +54,7 @@ impl DxgiCapturer {
                 CreateDXGIFactory1().context("Failed to create DXGI factory")?;
 
             let mut adapter_opt: Option<IDXGIAdapter1> = None;
-            let mut i = 0;
+            let i = 0;
             while let Ok(adapter) = factory.EnumAdapters1(i) {
                 adapter_opt = Some(adapter);
                 break;

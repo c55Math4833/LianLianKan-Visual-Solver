@@ -1,6 +1,6 @@
-use engine::board::{Board, Point, EMPTY, OBSTACLE};
+use engine::board::{Board, Point, OBSTACLE};
 use engine::profile::GameProfile;
-use engine::solver::{MatchType, Solver, SolverConfig};
+use engine::solver::{MatchType, Solver};
 use std::time::Instant;
 
 #[test]

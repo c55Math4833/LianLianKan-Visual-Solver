@@ -343,6 +343,7 @@ impl Solver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::EMPTY;
 
     #[test]
     fn test_zero_turn_adjacent_horizontal() {

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use engine::{
-    create_capturer, Controller, GameProfile, Matcher, MatcherConfig, Point, Solver, EMPTY,
+    create_capturer, Controller, GameProfile, Matcher, MatcherConfig, Solver, EMPTY,
 };
 use std::env;
 use std::path::{Path, PathBuf};
@@ -240,7 +240,6 @@ fn main() -> Result<()> {
 
         match best_match {
             Some(m) => {
-                consecutive_failures = 0;
                 println!(
                     "[Move #{:03}] Matched Tile #{:2} at {} <-> {} (Type: {:?}, Score: {}, Remaining: {})",
                     total_moves + 1,
@@ -262,6 +261,7 @@ fn main() -> Result<()> {
                     ) {
                         Ok(true) => {
                             total_moves += 1;
+                            consecutive_failures = 0;
                         }
                         Ok(false) => {
                             eprintln!(
@@ -280,6 +280,7 @@ fn main() -> Result<()> {
                     board.set_point(m.p1, EMPTY);
                     board.set_point(m.p2, EMPTY);
                     total_moves += 1;
+                    consecutive_failures = 0;
                 }
 
                 if consecutive_failures >= 5 {
