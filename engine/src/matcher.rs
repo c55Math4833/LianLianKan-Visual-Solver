@@ -217,10 +217,14 @@ impl Matcher {
         cols: usize,
     ) -> Result<Board> {
         let (w, h) = board_img.dimensions();
-        let cell_w = w / cols as u32;
-        let cell_h = h / rows as u32;
+        if rows == 0 || cols == 0 {
+            bail!("Invalid grid dimensions: rows={}, cols={}", rows, cols);
+        }
 
-        if cell_w == 0 || cell_h == 0 {
+        let cell_w_f = w as f64 / cols as f64;
+        let cell_h_f = h as f64 / rows as f64;
+
+        if cell_w_f < 1.0 || cell_h_f < 1.0 {
             bail!("Board dimensions too small for grid size {}x{}", rows, cols);
         }
 
@@ -228,10 +232,19 @@ impl Matcher {
 
         for r in 0..rows {
             for c in 0..cols {
-                let x = c as u32 * cell_w;
-                let y = r as u32 * cell_h;
+                let x = (c as f64 * cell_w_f).round() as u32;
+                let y = (r as f64 * cell_h_f).round() as u32;
+                let next_x = ((c + 1) as f64 * cell_w_f).round() as u32;
+                let next_y = ((r + 1) as f64 * cell_h_f).round() as u32;
 
-                let sub_view = image::imageops::crop_imm(board_img, x, y, cell_w, cell_h);
+                let cur_w = (next_x - x).min(w.saturating_sub(x));
+                let cur_h = (next_y - y).min(h.saturating_sub(y));
+
+                if cur_w == 0 || cur_h == 0 {
+                    continue;
+                }
+
+                let sub_view = image::imageops::crop_imm(board_img, x, y, cur_w, cur_h);
                 let dyn_cell = DynamicImage::ImageRgba8(sub_view.to_image());
 
                 let (id, _conf) = self.match_cell(&dyn_cell);
