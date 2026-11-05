@@ -1,0 +1,77 @@
+# Python bytecode & packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.spec
+
+# Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Rust build artifacts
+/engine/target/
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Studio runtime generated artifacts & experimental outputs
+/studio/templates/
+/studio/game_profile.json
+/studio/preview.html
+/studio/debug_*.png
+/studio/*.html
+/studio/debug_cells/
+/studio/__pycache__/
+game_profile.json
+templates/
+preview.html
+debug_*.png
+
+# Experimental / scratch scripts
+test_*.py
+inspect_*.py
+check_*.py
+analyze_*.py
+find_*.py
+auto_detect_*.py
+visual_*.py
+survey_*.py
+gen_*.py
+tune_*.py
+
+# Logs & temporary data
+*.log
+scratch/
+tmp/
+temp/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
