@@ -120,7 +120,7 @@ impl DxgiCapturer {
                     Quality: 0,
                 },
                 Usage: D3D11_USAGE_STAGING,
-                BindFlags: D3D11_BIND_FLAG(0),
+                BindFlags: 0,
                 CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
                 MiscFlags: 0,
             };
@@ -279,7 +279,7 @@ impl ScreenCapturer for GdiCapturer {
                 SRCCOPY,
             );
 
-            if !blt_res.as_bool() {
+            if blt_res.is_err() {
                 let _ = SelectObject(hdc_mem, old_obj);
                 let _ = DeleteObject(hbm);
                 let _ = DeleteDC(hdc_mem);
