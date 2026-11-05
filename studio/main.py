@@ -89,9 +89,9 @@ def run_studio_pipeline(
             print(f"[ROI 手動框選] 取得大略範圍: X={rough_roi['x']}, Y={rough_roi['y']}, W={rough_roi['w']}, H={rough_roi['h']}")
             roi = refine_board_roi(img, rough_roi)
             if roi != rough_roi:
-                print(f"[ROI 磁吸校正] 已自動對齊至真實週期邊界: X={roi['x']}, Y={roi['y']}, W={roi['w']}, H={roi['h']}")
+                print(f"[網格對齊] 已自動校準至物理網格晶格: X={roi['x']}, Y={roi['y']}, W={roi['w']}, H={roi['h']}")
         else:
-            print("[ROI 自動偵測] 啟動全自動週期網格邊界偵測演算法...")
+            print("[ROI 自動偵測] 啟動全自動棋盤整體外框偵測演算法...")
             roi = detect_board_roi(img)
     else:
         print("[ROI 自動偵測] 啟動全自動週期網格邊界偵測演算法...")
@@ -256,14 +256,14 @@ def run_screen_snip_mode(
     # Check if user dragged a valid region or requested auto-detect
     if rw > 20 and rh > 20:
         rough_roi = {"x": rx, "y": ry, "w": rw, "h": rh}
-        print(f"\n[手動框選] 取得大略範圍: X={rx}, Y={ry}, W={rw}, H={rh}")
+        print(f"\n[手動框選] 取得大略範圍: X={rx}, Y={ry}, 寬={rw}, 高={rh}")
         final_roi = refine_board_roi(screen_img, rough_roi)
         if final_roi != rough_roi:
-            print(f"[磁吸校正] 已自動對齊至真實週期邊界: X={final_roi['x']}, Y={final_roi['y']}, W={final_roi['w']}, H={final_roi['h']}")
+            print(f"[網格對齊] 已自動校準至物理網格晶格: X={final_roi['x']}, Y={final_roi['y']}, 寬={final_roi['w']}, 高={final_roi['h']}")
     else:
         print("\n[自動辨識] 使用者未手動框選或按下 C，啟動全自動棋盤整體外框偵測...")
         final_roi = detect_board_roi(screen_img)
-        print(f"[自動辨識] 成功鎖定盤面整體外框: X={final_roi['x']}, Y={final_roi['y']}, W={final_roi['w']}, H={final_roi['h']}")
+        print(f"[自動辨識] 成功鎖定盤面整體外框: X={final_roi['x']}, Y={final_roi['y']}, 寬={final_roi['w']}, 高={final_roi['h']}")
 
     fx, fy, fw, fh = final_roi["x"], final_roi["y"], final_roi["w"], final_roi["h"]
     cropped_board = screen_img[fy:fy+fh, fx:fx+fw]
