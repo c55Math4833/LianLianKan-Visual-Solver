@@ -1,6 +1,6 @@
 """
 LianLianKan Grid Calibrator
-Adaptive ROI selection and grid pitch detection using signal autocorrelation.
+Adaptive ROI selection, snap-to-grid auto-refinement, and grid pitch detection using signal autocorrelation.
 """
 
 import os
@@ -26,44 +26,114 @@ def save_image(path, img):
 
 def detect_board_roi(img):
     """
-    Auto-detect the game board bounding box if not explicitly specified.
-    Uses gradient analysis along the outer edges of the image.
+    Robustly auto-detect the game board outer bounding box.
+    Uses 1D Sobel gradient projections and autocorrelation signal analysis
+    to isolate the 2D periodic tile lattice from background HUD / windows.
     """
-    h, w, _ = img.shape
+    h, w = img.shape[:2]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # Sobel gradients
-    gx = np.abs(cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3))
-    gy = np.abs(cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3))
+    # Bilateral filter to smooth texture while retaining tile edges
+    blurred = cv2.bilateralFilter(gray, 5, 50, 50)
     
-    prof_x = np.mean(gx, axis=0)
-    prof_y = np.mean(gy, axis=1)
+    gx = np.abs(cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3))
+    gy = np.abs(cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3))
     
-    # Outer thresholding: find active board edges
-    # For data/未命名.jpg, edges are at x=68, 743 (w=675) and y=49, 456 (h=407)
-    thresh_x = np.mean(prof_x) * 1.5
-    thresh_y = np.mean(prof_y) * 1.5
+    # Threshold gradient to eliminate low-contrast background gradients
+    gx[gx < np.percentile(gx, 65)] = 0
+    gy[gy < np.percentile(gy, 65)] = 0
     
-    # Find first and last significant peaks
-    peaks_x, _ = find_peaks(prof_x, height=thresh_x, distance=20)
-    peaks_y, _ = find_peaks(prof_y, height=thresh_y, distance=20)
+    px = np.mean(gx, axis=0)
+    py = np.mean(gy, axis=1)
     
-    if len(peaks_x) >= 2 and len(peaks_y) >= 2:
-        x0 = int(peaks_x[0])
-        x1 = int(peaks_x[-1])
-        y0 = int(peaks_y[0])
-        y1 = int(peaks_y[-1])
-        return {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
+    def get_pitch(p, max_len):
+        norm = p - np.mean(p)
+        corr = np.correlate(norm, norm, mode='full')[len(p)-1:]
+        min_lag = 20
+        max_lag = min(120, max_len // 2)
+        if max_lag <= min_lag:
+            return 45.0
+        peaks, _ = find_peaks(corr[min_lag:max_lag], distance=12)
+        peaks = peaks + min_lag
+        if len(peaks) == 0:
+            return 45.0
+        return float(peaks[np.argmax(corr[peaks])])
+
+    pitch_x = get_pitch(px, w)
+    pitch_y = get_pitch(py, h)
     
-    # Default fallback
-    return {"x": 68, "y": 49, "w": 675, "h": 407}
+    dist_x = max(15, int(pitch_x * 0.7))
+    dist_y = max(15, int(pitch_y * 0.7))
+    
+    thresh_x = np.mean(px) * 0.7
+    thresh_y = np.mean(py) * 0.7
+    
+    peaks_x, _ = find_peaks(px, height=thresh_x, distance=dist_x)
+    peaks_y, _ = find_peaks(py, height=thresh_y, distance=dist_y)
+    
+    def find_best_lattice_run(peaks, pitch):
+        if len(peaks) < 2:
+            return 0, 0, 0
+        best_run = []
+        for i in range(len(peaks)):
+            run = [peaks[i]]
+            for j in range(i + 1, len(peaks)):
+                diff = peaks[j] - run[-1]
+                if abs(diff - pitch) <= pitch * 0.25:
+                    run.append(peaks[j])
+                elif diff > pitch * 1.25:
+                    break
+            if len(run) > len(best_run):
+                best_run = run
+        if len(best_run) >= 3:
+            return best_run[0], best_run[-1], len(best_run)
+        return peaks[0], peaks[-1], len(peaks)
+
+    x0, x1, count_x = find_best_lattice_run(peaks_x, pitch_x)
+    y0, y1, count_y = find_best_lattice_run(peaks_y, pitch_y)
+    
+    if x1 > x0 and y1 > y0:
+        return {"x": int(x0), "y": int(y0), "w": int(x1 - x0), "h": int(y1 - y0)}
+    
+    # Fallback to full image
+    return {"x": 0, "y": 0, "w": w, "h": h}
+
+def refine_board_roi(img, rough_roi):
+    """
+    Snap-to-Grid Auto Refinement:
+    Takes a rough user-drawn or roughly detected ROI and snaps the four boundaries
+    (left, top, right, bottom) to the nearest true periodic tile grid boundaries.
+    Eliminates human mouse dragging inaccuracies.
+    """
+    h_img, w_img = img.shape[:2]
+    rx = max(0, int(rough_roi['x']))
+    ry = max(0, int(rough_roi['y']))
+    rw = min(int(rough_roi['w']), w_img - rx)
+    rh = min(int(rough_roi['h']), h_img - ry)
+    
+    if rw < 40 or rh < 40:
+        return rough_roi
+        
+    crop = img[ry:ry+rh, rx:rx+rw]
+    detected = detect_board_roi(crop)
+    
+    # If the sub-detection found a clear periodic lattice within the crop:
+    if detected['w'] > 40 and detected['h'] > 40:
+        refined = {
+            'x': rx + detected['x'],
+            'y': ry + detected['y'],
+            'w': detected['w'],
+            'h': detected['h']
+        }
+        return refined
+    return rough_roi
 
 def estimate_adaptive_grid(roi_img):
     """
     Adaptive Grid Estimation using Autocorrelation Signal Analysis.
     Never hardcodes rows/cols:
     1. Computes Sobel gradient projections P_x and P_y.
-    2. Uses 1D signal autocorrelation to detect dominant pitch in [25, 100] px.
+    2. Uses 1D signal autocorrelation to detect dominant pitch in [20, 120] px.
     3. Computes estimated cols = round(roi_w / pitch_x) and rows = round(roi_h / pitch_y).
     """
     h, w, _ = roi_img.shape
@@ -83,26 +153,27 @@ def estimate_adaptive_grid(roi_img):
     py_norm = py - np.mean(py)
     corr_y = np.correlate(py_norm, py_norm, mode='full')[len(py)-1:]
     
-    # Search peaks in range [25, 100] pixels
-    min_lag, max_lag = 25, min(100, min(w, h) - 5)
-    peaks_x, _ = find_peaks(corr_x[min_lag:max_lag], distance=15)
-    peaks_x = peaks_x + min_lag
-    
-    peaks_y, _ = find_peaks(corr_y[min_lag:max_lag], distance=15)
-    peaks_y = peaks_y + min_lag
-    
-    if len(peaks_x) == 0:
-        pitch_x = 45.0
+    # Search peaks in range [20, 120] pixels
+    min_lag, max_lag = 20, min(120, min(w, h) - 5)
+    if max_lag <= min_lag:
+        pitch_x, pitch_y = 45.0, 45.0
     else:
-        pitch_x = float(peaks_x[np.argmax(corr_x[peaks_x])])
+        peaks_x, _ = find_peaks(corr_x[min_lag:max_lag], distance=12)
+        peaks_x = peaks_x + min_lag
+        if len(peaks_x) == 0:
+            pitch_x = 45.0
+        else:
+            pitch_x = float(peaks_x[np.argmax(corr_x[peaks_x])])
+            
+        peaks_y, _ = find_peaks(corr_y[min_lag:max_lag], distance=12)
+        peaks_y = peaks_y + min_lag
+        if len(peaks_y) == 0:
+            pitch_y = 45.0
+        else:
+            pitch_y = float(peaks_y[np.argmax(corr_y[peaks_y])])
         
-    if len(peaks_y) == 0:
-        pitch_y = 45.0
-    else:
-        pitch_y = float(peaks_y[np.argmax(corr_y[peaks_y])])
-        
-    cols = int(round(w / pitch_x))
-    rows = int(round(h / pitch_y))
+    cols = max(1, int(round(w / pitch_x)))
+    rows = max(1, int(round(h / pitch_y)))
     
     cell_w = w / cols
     cell_h = h / rows
@@ -118,55 +189,67 @@ def estimate_adaptive_grid(roi_img):
 
 def slice_cells(img, roi, rows, cols):
     """
-    Slices the board image into rows x cols cell patches with exact floating-point bounds.
-    Returns a list of dicts with cell images and metadata.
+    Slices the board into rows * cols cells.
+    Returns list of cell dictionaries.
     """
-    x0, y0, w, h = roi["x"], roi["y"], roi["w"], roi["h"]
-    cell_w = w / cols
-    cell_h = h / rows
+    x, y, w, h = roi["x"], roi["y"], roi["w"], roi["h"]
+    board_crop = img[y:y+h, x:x+w]
+    
+    cell_w = w / float(cols)
+    cell_h = h / float(rows)
     
     cells = []
     for r in range(rows):
         for c in range(cols):
-            x1 = int(round(x0 + c * cell_w))
-            y1 = int(round(y0 + r * cell_h))
-            x2 = int(round(x0 + (c + 1) * cell_w))
-            y2 = int(round(y0 + (r + 1) * cell_h))
+            x1 = int(round(c * cell_w))
+            y1 = int(round(r * cell_h))
+            x2 = int(round((c + 1) * cell_w))
+            y2 = int(round((r + 1) * cell_h))
             
-            # Ensure within image bounds
-            x1 = max(0, min(img.shape[1], x1))
-            x2 = max(0, min(img.shape[1], x2))
-            y1 = max(0, min(img.shape[0], y1))
-            y2 = max(0, min(img.shape[0], y2))
+            # Boundary checks
+            x2 = min(x2, w)
+            y2 = min(y2, h)
             
-            patch = img[y1:y2, x1:x2].copy()
+            cell_img = board_crop[y1:y2, x1:x2].copy()
+            
+            # Screen absolute coordinate center
+            center_x = x + int(round((x1 + x2) / 2.0))
+            center_y = y + int(round((y1 + y2) / 2.0))
+            
             cells.append({
                 "row": r,
                 "col": c,
-                "bbox": (x1, y1, x2 - x1, y2 - y1),
-                "center": (x0 + (c + 0.5) * cell_w, y0 + (r + 0.5) * cell_h),
-                "image": patch
+                "bbox": {"x": x + x1, "y": y + y1, "w": x2 - x1, "h": y2 - y1},
+                "center": {"x": center_x, "y": center_y},
+                "image": cell_img
             })
+            
     return cells
 
-def draw_grid_overlay(img, roi, rows, cols, output_path="debug_grid_on_roi.png"):
-    """Draws grid lines strictly within the board ROI and saves preview."""
+def draw_grid_overlay(img, roi, rows, cols, output_path=None):
+    """
+    Draws the calibrated grid overlay onto a copy of the image and saves it.
+    """
     overlay = img.copy()
-    x0, y0, w, h = roi["x"], roi["y"], roi["w"], roi["h"]
-    cell_w = w / cols
-    cell_h = h / rows
+    x, y, w, h = roi["x"], roi["y"], roi["w"], roi["h"]
     
-    # Draw ROI outer border in green
-    cv2.rectangle(overlay, (x0, y0), (x0 + w, y0 + h), (0, 255, 0), 2)
+    # Outer ROI rectangle
+    cv2.rectangle(overlay, (x, y), (x + w, y + h), (0, 0, 255), 2)
     
-    # Draw internal grid lines in cyan
-    for r in range(1, rows):
-        y = int(round(y0 + r * cell_h))
-        cv2.line(overlay, (x0, y), (x0 + w, y), (255, 255, 0), 1)
+    cell_w = w / float(cols)
+    cell_h = h / float(rows)
+    
+    # Vertical grid lines
+    for c in range(cols + 1):
+        cx = int(round(x + c * cell_w))
+        cv2.line(overlay, (cx, y), (cx, y + h), (0, 255, 0), 1)
         
-    for c in range(1, cols):
-        x = int(round(x0 + c * cell_w))
-        cv2.line(overlay, (x, y0), (x, y0 + h), (255, 255, 0), 1)
+    # Horizontal grid lines
+    for r in range(rows + 1):
+        ry = int(round(y + r * cell_h))
+        cv2.line(overlay, (x, ry), (x + w, ry), (0, 255, 0), 1)
         
-    save_image(output_path, overlay)
+    if output_path:
+        save_image(output_path, overlay)
+        
     return overlay

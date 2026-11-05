@@ -13,6 +13,9 @@ fn test_complex_u_turn_outside_board() {
     board.set(0, 1, 9);
     board.set(0, 2, 9);
     board.set(0, 3, 1);
+    // Block interior row 1 so the solver is forced to route through the outer perimeter above row 0 (row -1)
+    board.set(1, 0, OBSTACLE);
+    board.set(1, 3, OBSTACLE);
 
     let solver = Solver::new();
     let m = solver.can_connect(&board, Point::new(0, 0), Point::new(0, 3));
@@ -38,6 +41,9 @@ fn test_vertical_u_turn_around_left_margin() {
     board.set(2, 0, OBSTACLE);
     board.set(3, 0, OBSTACLE);
     board.set(4, 0, 7);
+    // Block interior column 1 so the solver is forced to route through the outer perimeter to the left (col -1)
+    board.set(0, 1, OBSTACLE);
+    board.set(4, 1, OBSTACLE);
 
     let solver = Solver::new();
     let m = solver.can_connect(&board, Point::new(0, 0), Point::new(4, 0));
