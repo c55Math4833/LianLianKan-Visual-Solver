@@ -69,7 +69,7 @@ impl Controller {
             let _ = SetCursorPos(x, y);
             sleep(Duration::from_millis(10));
 
-            let mut inputs = [
+            let inputs = [
                 INPUT {
                     r#type: INPUT_MOUSE,
                     Anonymous: INPUT_0 {

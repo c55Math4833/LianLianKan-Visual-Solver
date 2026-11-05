@@ -1,4 +1,4 @@
-use crate::board::{Board, PaddedBoard, Point, EMPTY};
+use crate::board::{Board, PaddedBoard, Point};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

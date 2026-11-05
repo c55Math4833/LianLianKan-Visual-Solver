@@ -55,8 +55,7 @@ def run_studio_pipeline(
     elif roi_override:
         roi = roi_override
     else:
-        # Default verified ROI on 未命名.jpg or auto-detect
-        roi = {"x": 68, "y": 49, "w": 675, "h": 407}
+        roi = detect_board_roi(img)
         
     print(f"[2/6] Board ROI: X={roi['x']}, Y={roi['y']}, W={roi['w']}, H={roi['h']}")
     

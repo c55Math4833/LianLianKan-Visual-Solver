@@ -1,17 +1,15 @@
 use anyhow::{anyhow, bail, Context, Result};
 use image::{Rgba, RgbaImage};
-use std::ptr::null_mut;
 
 #[cfg(windows)]
 use windows::{
     core::Interface,
     Win32::{
-        Foundation::{HWND, RECT},
         Graphics::{
             Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0},
             Direct3D11::{
                 D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-                D3D11_BIND_FLAG, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG,
+                D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG,
                 D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
                 D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
             },
@@ -120,7 +118,7 @@ impl DxgiCapturer {
                     Quality: 0,
                 },
                 Usage: D3D11_USAGE_STAGING,
-                BindFlags: D3D11_BIND_FLAG(0),
+                BindFlags: 0,
                 CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
                 MiscFlags: 0,
             };
@@ -279,7 +277,7 @@ impl ScreenCapturer for GdiCapturer {
                 SRCCOPY,
             );
 
-            if !blt_res.as_bool() {
+            if blt_res.is_err() {
                 let _ = SelectObject(hdc_mem, old_obj);
                 let _ = DeleteObject(hbm);
                 let _ = DeleteDC(hdc_mem);
