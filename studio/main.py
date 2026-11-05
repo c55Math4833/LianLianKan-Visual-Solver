@@ -1,6 +1,8 @@
 """
 LianLianKan Visual Studio CLI
-Main entry point for calibration, slicing, clustering, exporting, and previewing.
+Supports:
+1. Live Screen Snip & Analyze (drag box directly on actual screen, crop, and solve)
+2. Existing Screenshot Image File Analysis (drag file, manual ROI, or auto-detect)
 """
 
 import os
@@ -8,6 +10,7 @@ import sys
 import argparse
 import webbrowser
 import cv2
+import numpy as np
 
 from grid_calibrator import (
     load_image,
@@ -20,40 +23,72 @@ from grid_calibrator import (
 from feature_extractor import extract_features
 from clusterer import cluster_matchable_tiles
 from exporter import export_all
+from screen_capturer import capture_screen
+
+def find_default_image():
+    candidates = [
+        "data/未命名.jpg",
+        "data/未命名(3).jpg",
+        "data/未命名(2).png",
+        "data/未命名(4).jpg",
+        "../data/未命名.jpg",
+        "../data/未命名(3).jpg",
+        "未命名.jpg",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
 
 def run_studio_pipeline(
-    image_path,
+    image_input,
     roi_override=None,
     interactive_roi=False,
     open_browser=False,
     output_templates="templates",
     output_profile="game_profile.json",
-    output_preview="preview.html"
+    output_preview="preview.html",
+    export_roi_override=None
 ):
     print("=" * 60)
     print("LianLianKan Studio - Visual Slicer & Profile Generator")
     print("=" * 60)
     
-    # 1. Load Image
-    if not os.path.exists(image_path):
-        raise FileNotFoundError(f"Input image not found: {image_path}")
-    img = load_image(image_path)
-    h, w, c = img.shape
-    print(f"[1/6] Loaded image: {image_path} (W={w}, H={h})")
+    # 1. Load Image (from path or numpy array)
+    if isinstance(image_input, str):
+        if not os.path.exists(image_input):
+            raise FileNotFoundError(f"Input image not found: {image_input}")
+        img = load_image(image_input)
+        img_label = image_input
+    elif isinstance(image_input, np.ndarray):
+        img = image_input
+        img_label = "Screen Capture / In-Memory Image"
+    else:
+        raise ValueError(f"Invalid image input type: {type(image_input)}")
+        
+    h, w, _ = img.shape
+    print(f"[1/6] Loaded image: {img_label} (W={w}, H={h})")
     
     # 2. ROI Determination
-    if interactive_roi:
-        print("[ROI] Opening OpenCV window for interactive ROI selection...")
-        print("[ROI] Drag to select board ROI, then press SPACE or ENTER. Press 'c' to cancel.")
+    if roi_override:
+        roi = roi_override
+        print(f"[ROI] 使用指定盤面範圍: X={roi['x']}, Y={roi['y']}, W={roi['w']}, H={roi['h']}")
+    elif interactive_roi:
+        print("\n" + "=" * 60)
+        print(" [ROI 互動框選提示]")
+        print(" 已開啟視窗【Select Board ROI】：")
+        print(" 1. 請使用滑鼠左鍵【拖曳框選】遊戲棋盤實際區域")
+        print(" 2. 框選完成後請按鍵盤【SPACE】或【ENTER】確認")
+        print(" 3. 若想取消手動框選改用全自動演算法偵測，請按【C】")
+        print("=" * 60 + "\n")
         cv_roi = cv2.selectROI("Select Board ROI", img, fromCenter=False, showCrosshair=True)
         cv2.destroyAllWindows()
-        if cv_roi[2] > 0 and cv_roi[3] > 0:
+        if cv_roi[2] > 10 and cv_roi[3] > 10:
             roi = {"x": int(cv_roi[0]), "y": int(cv_roi[1]), "w": int(cv_roi[2]), "h": int(cv_roi[3])}
+            print(f"[ROI] 成功取得自選範圍: X={roi['x']}, Y={roi['y']}, W={roi['w']}, H={roi['h']}")
         else:
-            print("[ROI] Selection cancelled. Falling back to default/auto-detection.")
+            print("[ROI] 取消手動框選，改用全自動邊界偵測...")
             roi = detect_board_roi(img)
-    elif roi_override:
-        roi = roi_override
     else:
         roi = detect_board_roi(img)
         
@@ -110,10 +145,11 @@ def run_studio_pipeline(
     else:
         print("      [WARNING] One or more clusters violated the parity constraint!")
         
-    # 6. Exporter
+    # 6. Exporter (use export_roi_override if given for live screen coordinates)
+    exported_roi = export_roi_override if export_roi_override else roi
     print(f"[6/6] Exporting templates, game profile, and HTML preview...")
     profile = export_all(
-        board_roi=roi,
+        board_roi=exported_roi,
         grid_info=grid_info,
         empty_cells=empty_cells,
         obstacle_cells=obstacle_cells,
@@ -137,31 +173,194 @@ def run_studio_pipeline(
     print("=" * 60)
     return profile
 
+def run_screen_snip_mode(
+    output_screenshot="screenshot_board.png",
+    open_browser=True,
+    output_templates="templates",
+    output_profile="game_profile.json",
+    output_preview="preview.html"
+):
+    """
+    Mode 1: Live Screen Snip
+    Captures primary screen, opens fullscreen selection window.
+    User drags a rectangle around the game board.
+    Saves screenshot and passes exact physical screen coordinates to profile.
+    """
+    print("\n" + "=" * 60)
+    print("        [模式 1：螢幕直接框選截圖]")
+    print(" 正在即時截取螢幕畫面...")
+    screen_img = capture_screen()
+    h, w, _ = screen_img.shape
+    print(f" 螢幕解析度: {w}x{h}")
+    print("=" * 60)
+    print(" [ROI 框選提示]")
+    print(" 已開啟全螢幕視窗【Screen Snip - Select Game Board】：")
+    print(" 1. 請使用滑鼠左鍵【拖曳框選】遊戲棋盤區域")
+    print(" 2. 框選完畢後請按鍵盤【SPACE】或【ENTER】確認")
+    print(" 3. 若要取消請按【ESC】或【C】")
+    print("=" * 60 + "\n")
+
+    win_title = "Screen Snip - Select Game Board (SPACE/ENTER: Confirm, ESC: Cancel)"
+    cv2.namedWindow(win_title, cv2.WINDOW_NORMAL)
+    try:
+        cv2.setWindowProperty(win_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    except Exception:
+        pass
+
+    cv_roi = cv2.selectROI(win_title, screen_img, fromCenter=False, showCrosshair=True)
+    cv2.destroyAllWindows()
+
+    rx, ry, rw, rh = int(cv_roi[0]), int(cv_roi[1]), int(cv_roi[2]), int(cv_roi[3])
+    if rw <= 10 or rh <= 10:
+        print("[提示] 使用者取消框選或選取區域無效。")
+        return None
+
+    print(f"\n[ROI 鎖定] 成功選取螢幕範圍: X={rx}, Y={ry}, 寬={rw}, 高={rh}")
+    cropped_board = screen_img[ry:ry+rh, rx:rx+rw]
+    save_image(output_screenshot, cropped_board)
+    print(f"[儲存] 已將框選盤面截圖存至: {os.path.abspath(output_screenshot)}")
+
+    return run_studio_pipeline(
+        image_input=cropped_board,
+        roi_override={"x": 0, "y": 0, "w": rw, "h": rh},
+        interactive_roi=False,
+        open_browser=open_browser,
+        output_templates=output_templates,
+        output_profile=output_profile,
+        output_preview=output_preview,
+        export_roi_override={"x": rx, "y": ry, "w": rw, "h": rh}
+    )
+
+def run_existing_image_mode(
+    image_path=None,
+    roi_override=None,
+    interactive_roi=True,
+    open_browser=True,
+    output_templates="templates",
+    output_profile="game_profile.json",
+    output_preview="preview.html"
+):
+    """
+    Mode 2: Existing Image File Analysis
+    Loads image from path or prompts user to drag/enter file.
+    """
+    if not image_path:
+        default_img = find_default_image()
+        print("\n" + "=" * 60)
+        print("        [模式 2：讀取現有截圖檔案]")
+        print("=" * 60)
+        print(" 請提供遊戲截圖檔案：")
+        print(" 1. 直接將圖片檔案【拖曳進此視窗】後按 Enter")
+        if default_img:
+            print(f" 2. 或直接按 Enter 使用預設圖片: {default_img}")
+        print("=" * 60)
+        while True:
+            try:
+                user_input = input("請輸入或拖曳圖片路徑: ").strip().strip('"').strip("'")
+            except (EOFError, KeyboardInterrupt):
+                print("\n操作已取消。")
+                return None
+            if not user_input:
+                if default_img and os.path.exists(default_img):
+                    image_path = default_img
+                    print(f"[提示] 選用預設圖片: {image_path}")
+                    break
+                else:
+                    print("[錯誤] 請輸入有效的圖片路徑！")
+                    continue
+            elif os.path.exists(user_input):
+                image_path = user_input
+                break
+            else:
+                print(f"[錯誤] 找不到檔案: {user_input}，請重新輸入！")
+
+    return run_studio_pipeline(
+        image_input=image_path,
+        roi_override=roi_override,
+        interactive_roi=interactive_roi,
+        open_browser=open_browser,
+        output_templates=output_templates,
+        output_profile=output_profile,
+        output_preview=output_preview
+    )
+
 def main():
     parser = argparse.ArgumentParser(description="LianLianKan Visual Studio")
-    parser.add_argument("--image", "-i", type=str, default=r"..\data\未命名.jpg", help="Path to input board image")
+    parser.add_argument("--snip", "-s", action="store_true", help="Launch live screen snip mode (Mode 1)")
+    parser.add_argument("--image", "-i", type=str, default=None, help="Path to input screenshot image (Mode 2)")
     parser.add_argument("--roi", nargs=4, type=int, metavar=('X', 'Y', 'W', 'H'), help="Manual ROI bounding box")
-    parser.add_argument("--interactive", action="store_true", help="Launch interactive cv2.selectROI")
-    parser.add_argument("--open", action="store_true", help="Automatically open preview.html in browser")
+    parser.add_argument("--no-interactive", action="store_true", help="Disable interactive ROI selection GUI")
+    parser.add_argument("--no-browser", action="store_true", help="Do not open preview.html in browser")
     parser.add_argument("--templates", type=str, default="templates", help="Output templates directory")
     parser.add_argument("--profile", type=str, default="game_profile.json", help="Output game_profile.json path")
     parser.add_argument("--preview", type=str, default="preview.html", help="Output preview.html path")
     
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
     
-    roi_override = None
-    if args.roi:
-        roi_override = {"x": args.roi[0], "y": args.roi[1], "w": args.roi[2], "h": args.roi[3]}
+    # Check if a file was passed as naked argument (e.g. dragged onto studio.exe in Windows Explorer)
+    dragged_file = None
+    if unknown:
+        candidate = unknown[0].strip('"').strip("'")
+        if os.path.exists(candidate) and os.path.isfile(candidate):
+            dragged_file = candidate
+
+    # 1. Direct Mode 1 (Screen Snip)
+    if args.snip:
+        run_screen_snip_mode(
+            open_browser=not args.no_browser,
+            output_templates=args.templates,
+            output_profile=args.profile,
+            output_preview=args.preview
+        )
+    # 2. Direct Mode 2 (Image provided via argument or drag-and-drop)
+    elif args.image or dragged_file:
+        target_img = args.image if args.image else dragged_file
+        roi_override = None
+        if args.roi:
+            roi_override = {"x": args.roi[0], "y": args.roi[1], "w": args.roi[2], "h": args.roi[3]}
+            interactive = False
+        else:
+            interactive = not args.no_interactive
+
+        run_existing_image_mode(
+            image_path=target_img,
+            roi_override=roi_override,
+            interactive_roi=interactive,
+            open_browser=not args.no_browser,
+            output_templates=args.templates,
+            output_profile=args.profile,
+            output_preview=args.preview
+        )
+    # 3. Interactive Menu Mode
+    else:
+        print("\n" + "=" * 60)
+        print("       LianLianKan Studio 盤面分析與特徵建模工具")
+        print("=" * 60)
+        print("請選擇分析模式：")
+        print("  [1] 螢幕直接框選（立即截取當前螢幕畫面，用滑鼠拖曳框選棋盤）")
+        print("  [2] 讀取現有截圖（手動輸入路徑或將截圖檔案拖曳至此視窗）")
+        print("=" * 60)
         
-    run_studio_pipeline(
-        image_path=args.image,
-        roi_override=roi_override,
-        interactive_roi=args.interactive,
-        open_browser=args.open,
-        output_templates=args.templates,
-        output_profile=args.profile,
-        output_preview=args.preview
-    )
+        try:
+            choice = input("請選擇模式 [1/2] (預設 1): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n已取消。")
+            return
+            
+        if choice == "2":
+            run_existing_image_mode(
+                open_browser=not args.no_browser,
+                output_templates=args.templates,
+                output_profile=args.profile,
+                output_preview=args.preview
+            )
+        else:
+            run_screen_snip_mode(
+                open_browser=not args.no_browser,
+                output_templates=args.templates,
+                output_profile=args.profile,
+                output_preview=args.preview
+            )
 
 if __name__ == "__main__":
     main()

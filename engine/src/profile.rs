@@ -6,7 +6,9 @@ use std::path::Path;
 pub struct RoiConfig {
     pub x: i32,
     pub y: i32,
+    #[serde(alias = "w")]
     pub width: u32,
+    #[serde(alias = "h")]
     pub height: u32,
 }
 

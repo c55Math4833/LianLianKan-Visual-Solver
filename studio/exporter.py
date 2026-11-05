@@ -102,7 +102,9 @@ def export_all(
                 "x": int(board_roi["x"]),
                 "y": int(board_roi["y"]),
                 "w": int(board_roi["w"]),
-                "h": int(board_roi["h"])
+                "h": int(board_roi["h"]),
+                "width": int(board_roi["w"]),
+                "height": int(board_roi["h"])
             },
             "cell_size": {
                 "w": round(float(grid_info["cell_w"]), 2),

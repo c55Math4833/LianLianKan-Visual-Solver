@@ -448,6 +448,9 @@ mod tests {
         board.set(0, 1, 4);
         board.set(0, 2, -1); // Obstacle in between
         board.set(0, 3, 4);
+        // Block interior row 1 so path must go around the outer perimeter (row -1)
+        board.set(1, 1, -1);
+        board.set(1, 3, -1);
 
         let solver = Solver::new();
         let m = solver.can_connect(&board, Point::new(0, 1), Point::new(0, 3));
