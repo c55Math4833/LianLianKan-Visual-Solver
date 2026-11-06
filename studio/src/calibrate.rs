@@ -182,16 +182,8 @@ fn boundary_ok(profile: &[f64], first: f64, pitch: f64, ncell: usize, size: usiz
     (0..ncell).map(|k| e[k] >= 0.25 * r && e[k + 1] >= 0.25 * r).collect()
 }
 
-pub struct Aligned {
-    pub roi: Roi,
-    pub rows: usize,
-    pub cols: usize,
-    pub pitch_x: f64,
-    pub pitch_y: f64,
-}
-
 /// Lattice alignment inside `approx` (the user's rough selection).
-pub fn align_grid_lattice(img: &Image, approx: Option<Roi>) -> Aligned {
+pub fn align_grid_lattice(img: &Image, approx: Option<Roi>) -> Roi {
     let approx = approx.unwrap_or(Roi { x: 0, y: 0, w: img.w as i64, h: img.h as i64 });
     let rx = approx.x.max(0);
     let ry = approx.y.max(0);
@@ -239,17 +231,11 @@ pub fn align_grid_lattice(img: &Image, approx: Option<Roi>) -> Aligned {
     let final_w = pyround(cols as f64 * pitch_x).min(rw - final_x);
     let final_h = pyround(rows as f64 * pitch_y).min(rh - final_y);
 
-    Aligned {
-        roi: Roi { x: rx + final_x, y: ry + final_y, w: final_w, h: final_h },
-        rows,
-        cols,
-        pitch_x,
-        pitch_y,
-    }
+    Roi { x: rx + final_x, y: ry + final_y, w: final_w, h: final_h }
 }
 
 pub fn refine_board_roi(img: &Image, rough: Roi) -> Roi {
-    align_grid_lattice(img, Some(rough)).roi
+    align_grid_lattice(img, Some(rough))
 }
 
 pub struct GridInfo {
@@ -311,4 +297,159 @@ pub fn slice_cells(img: &Image, roi: Roi, rows: usize, cols: usize) -> Vec<Cell>
         }
     }
     cells
+}
+
+/// Result of fitting a grid with a KNOWN number of rows / columns.
+pub struct KnownFit {
+    pub roi: Roi,
+    /// 0..1: mean edge strength on the fitted grid lines relative to the strongest lines (low = unreliable).
+    pub confidence: f64,
+}
+
+/// Fit one axis: `n` cells, start near `rough_start` (±1 cell), pitch in `[p_lo, p_hi]`.
+/// Maximises the summed edge strength on the n+1 grid lines. Returns (start, pitch, score per line).
+fn fit_axis(profile: &[f64], origin: f64, rough_start: f64, n: usize, p_lo: f64, p_hi: f64) -> (f64, f64, f64) {
+    // tolerance: edge peaks are 1-3 px wide, take the local max in +-1 px
+    let at = |pos: f64| -> f64 {
+        let i = pos.round() as i64 - origin.round() as i64;
+        let mut m = 0.0f64;
+        for d in -1..=1 {
+            let j = i + d;
+            if j >= 0 && (j as usize) < profile.len() {
+                m = m.max(profile[j as usize]);
+            }
+        }
+        m
+    };
+    let score = |x0: f64, p: f64| -> f64 { (0..=n).map(|k| at(x0 + k as f64 * p)).sum::<f64>() };
+    let mut best = (rough_start, (p_lo + p_hi) / 2.0, f64::MIN);
+    let mut p = p_lo;
+    while p <= p_hi {
+        let span = p;
+        let mut x0 = rough_start - span;
+        while x0 <= rough_start + span {
+            let s = score(x0, p);
+            if s > best.2 {
+                best = (x0, p, s);
+            }
+            x0 += 0.5;
+        }
+        p += 0.1;
+    }
+    // local refinement around the optimum
+    let (bx, bp, _) = best;
+    let mut best2 = best;
+    let mut dp = -0.2;
+    while dp <= 0.2 {
+        let mut dx = -0.75;
+        while dx <= 0.75 {
+            let s = score(bx + dx, bp + dp);
+            if s > best2.2 {
+                best2 = (bx + dx, bp + dp, s);
+            }
+            dx += 0.125;
+        }
+        dp += 0.025;
+    }
+    (best2.0, best2.1, best2.2 / (n + 1) as f64)
+}
+
+/// Re-find the board frame when rows/cols are KNOWN (e.g. the game window was scaled):
+/// the user's rough rectangle (at most ~1 tile larger/smaller than the board) only seeds the
+/// search; position and cell size are fitted to the image's grid lines.
+pub fn fit_known_grid(img: &Image, rough: Roi, rows: usize, cols: usize) -> KnownFit {
+    let (iw, ih) = (img.w as i64, img.h as i64);
+    let pad_x = (rough.w as f64 / cols as f64 * 1.6) as i64;
+    let pad_y = (rough.h as f64 / rows as f64 * 1.6) as i64;
+    let wx0 = (rough.x - pad_x).max(0);
+    let wy0 = (rough.y - pad_y).max(0);
+    let wx1 = (rough.x + rough.w + pad_x).min(iw);
+    let wy1 = (rough.y + rough.h + pad_y).min(ih);
+    let sub = img.crop(wx0 as usize, wy0 as usize, (wx1 - wx0) as usize, (wy1 - wy0) as usize);
+    let (w, h) = (sub.w, sub.h);
+    let g = gray(&sub);
+    let gx = sobel(&g, w, h, true);
+    let gy = sobel(&g, w, h, false);
+    // vertical lines are measured over the rough board rows only (and vice versa) so the surroundings don't pollute
+    let (ry0, ry1) = (((rough.y - wy0).max(0) as usize).min(h), ((rough.y + rough.h - wy0).max(0) as usize).min(h));
+    let (rx0, rx1) = (((rough.x - wx0).max(0) as usize).min(w), ((rough.x + rough.w - wx0).max(0) as usize).min(w));
+    let mut px = vec![0.0; w];
+    let mut py = vec![0.0; h];
+    for y in ry0..ry1 {
+        for x in 0..w {
+            px[x] += gx[y * w + x].abs();
+        }
+    }
+    for y in 0..h {
+        for x in rx0..rx1 {
+            py[y] += gy[y * w + x].abs();
+        }
+    }
+    px.iter_mut().for_each(|v| *v /= (ry1 - ry0).max(1) as f64);
+    py.iter_mut().for_each(|v| *v /= (rx1 - rx0).max(1) as f64);
+
+    // the rough rectangle holds the board plus up to ~1 tile of slack on each axis
+    let range = |len: f64, n: usize| (len / (n as f64 + 1.3), len / (n as f64 - 0.3).max(1.0));
+    let (xl, xh) = range(rough.w as f64, cols);
+    let (yl, yh) = range(rough.h as f64, rows);
+    let (sx, pxit, scx) = fit_axis(&px, 0.0, (rough.x - wx0) as f64, cols, xl, xh);
+    let (sy, pyit, scy) = fit_axis(&py, 0.0, (rough.y - wy0) as f64, rows, yl, yh);
+
+    // confidence: fitted line strength vs the profile's own strong peaks
+    let top = |p: &[f64]| {
+        let mut v: Vec<f64> = p.to_vec();
+        v.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        let k = (v.len() / 10).max(1);
+        v[..k].iter().sum::<f64>() / k as f64
+    };
+    let conf = ((scx / top(&px).max(1e-9)) + (scy / top(&py).max(1e-9))) / 2.0;
+
+    let x = wx0 as f64 + sx;
+    let y = wy0 as f64 + sy;
+    KnownFit {
+        roi: Roi {
+            x: pyround(x),
+            y: pyround(y),
+            w: pyround(cols as f64 * pxit),
+            h: pyround(rows as f64 * pyit),
+        },
+        confidence: conf.clamp(0.0, 1.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::imgproc::resize;
+
+    /// Scale the whole screenshot, then re-find the frame from a sloppy rectangle.
+    #[test]
+    fn known_grid_refit_after_scaling() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test_data/data5-1.jpg");
+        let Ok(img) = image::open(path) else { return };
+        let img = Image::from_rgb(&img.to_rgb8());
+        let roi = refine_board_roi(&img, Roi { x: 0, y: 0, w: img.w as i64, h: img.h as i64 });
+        let g = estimate_adaptive_grid(&img.crop(roi.x as usize, roi.y as usize, roi.w as usize, roi.h as usize));
+        for &f in &[0.75f64, 1.0, 1.3] {
+            let sc = resize(&img, (img.w as f64 * f) as usize, (img.h as f64 * f) as usize);
+            // expected frame after scaling
+            let exp = Roi { x: (roi.x as f64 * f) as i64, y: (roi.y as f64 * f) as i64, w: (roi.w as f64 * f) as i64, h: (roi.h as f64 * f) as i64 };
+            let cell = exp.w as f64 / g.cols as f64;
+            // sloppy rough: shifted by 0.4 cell and ~0.8 cell larger
+            let rough = Roi {
+                x: exp.x - (0.4 * cell) as i64,
+                y: exp.y + (0.3 * cell) as i64,
+                w: exp.w + (0.8 * cell) as i64,
+                h: exp.h + (0.7 * cell) as i64,
+            };
+            let fit = known_fit_for_test(&sc, rough, g.rows, g.cols);
+            let tol = 2 + (f * 1.5) as i64;
+            assert!((fit.roi.x - exp.x).abs() <= tol && (fit.roi.y - exp.y).abs() <= tol, "f={f} pos {:?} vs {:?}", fit.roi, exp);
+            assert!((fit.roi.w - exp.w).abs() <= tol * 2 && (fit.roi.h - exp.h).abs() <= tol * 2, "f={f} size {:?} vs {:?}", fit.roi, exp);
+        }
+    }
+
+    fn known_fit_for_test(img: &Image, rough: Roi, rows: usize, cols: usize) -> KnownFit {
+        fit_known_grid(img, rough, rows, cols)
+    }
 }

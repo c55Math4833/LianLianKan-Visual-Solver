@@ -25,9 +25,20 @@ use windows::{
                 DIB_RGB_COLORS, HDC, HGDIOBJ, SRCCOPY,
             },
         },
+        UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
         UI::WindowsAndMessaging::{GetDesktopWindow, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN},
     },
 };
+
+/// Must run before any window / screen / cursor call. Without it, on a scaled display (125 %, 150 %...)
+/// Windows hands this process "virtualised" coordinates: captures come from the wrong place and
+/// SetCursorPos clicks land off-target, while the studio profile stores real (physical) pixels.
+pub fn enable_dpi_awareness() {
+    #[cfg(windows)]
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
 
 pub trait ScreenCapturer {
     fn capture_full(&mut self) -> Result<RgbaImage>;
@@ -44,6 +55,8 @@ pub struct DxgiCapturer {
     width: u32,
     height: u32,
     last_frame: Option<RgbaImage>,
+    /// Used for regions outside the primary monitor (DXGI only duplicates output 0).
+    gdi: GdiCapturer,
 }
 
 #[cfg(windows)]
@@ -138,6 +151,7 @@ impl DxgiCapturer {
                 width,
                 height,
                 last_frame: None,
+                gdi: GdiCapturer { width, height },
             })
         }
     }
@@ -211,6 +225,13 @@ impl ScreenCapturer for DxgiCapturer {
     }
 
     fn capture_roi(&mut self, x: i32, y: i32, width: u32, height: u32) -> Result<RgbaImage> {
+        // Profile coordinates are virtual-desktop pixels. Only a region fully inside the primary
+        // monitor can come from the DXGI duplication; anything else (second monitor, negative
+        // offsets) goes through GDI, which sees the whole virtual desktop.
+        let inside = x >= 0 && y >= 0 && x as i64 + width as i64 <= self.width as i64 && y as i64 + height as i64 <= self.height as i64;
+        if !inside {
+            return self.gdi.capture_roi(x, y, width, height);
+        }
         let full = self.capture_full()?;
         let cropped = image::imageops::crop_imm(
             &full,

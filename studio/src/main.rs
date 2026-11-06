@@ -34,6 +34,7 @@ struct Args {
     image: Option<PathBuf>,
     snip: bool,
     add: bool,
+    reroi: bool,
     select: bool,
     selftest: bool,
     monitor: Option<usize>,
@@ -68,6 +69,7 @@ fn parse_args() -> Result<Args> {
         image: None,
         snip: false,
         add: false,
+        reroi: false,
         select: false,
         selftest: false,
         monitor: None,
@@ -87,6 +89,7 @@ fn parse_args() -> Result<Args> {
             "--image" | "-i" => { args.image = Some(PathBuf::from(next(i)?)); i += 1; }
             "--snip" | "-s" => args.snip = true,
             "--add" => args.add = true,
+            "--reroi" => args.reroi = true,
             "--select" => args.select = true,
             "--self-test-window" => args.selftest = true,
             "--monitor" | "-m" => { args.monitor = Some(next(i)?.parse().context("--monitor needs a number")?); i += 1; }
@@ -107,7 +110,7 @@ fn parse_args() -> Result<Args> {
         }
         i += 1;
     }
-    if !args.snip && !args.selftest && args.image.is_none() {
+    if !args.snip && !args.reroi && !args.selftest && args.image.is_none() {
         menu(&mut args)?;
     }
     Ok(args)
@@ -122,12 +125,17 @@ fn menu(args: &mut Args) -> Result<()> {
     println!("  [1] 螢幕框選截圖 (滑鼠手動框選棋盤，框選範圍超出棋盤勿大於 1 個磚塊)");
     println!("  [2] 讀取現有截圖檔案 (支援拖曳圖片，並手動框選棋盤)");
     println!("  [3] 追加截圖 (新關卡出現新物件時，把新物件補進現有模板庫)");
+    println!("  [4] 調整既有 profile 的框選區域 (遊戲視窗移動／縮放後，重新對準 ROI)");
     println!("{}", "=".repeat(60));
-    print!("請選擇模式 [1/2/3] (預設 1): ");
+    print!("請選擇模式 [1/2/3/4] (預設 1): ");
     std::io::stdout().flush().ok();
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     let choice = line.trim().to_string();
+    if choice == "4" {
+        args.reroi = true;
+        return Ok(());
+    }
     if choice == "3" {
         args.add = true;
         println!("新截圖來源：  [1] 螢幕框選   [2] 讀取截圖檔案");
@@ -172,8 +180,10 @@ fn print_selection_help() {
     println!("{}", "=".repeat(60));
     println!(" [ROI 框選提示]");
     println!(" 1. 用滑鼠左鍵【拖曳框選】棋盤（系統會自動磁吸對齊磚塊外緣）");
-    println!(" 2. 框選完畢按【Enter】或【Space】確認；【Esc】取消");
-    println!(" 3. 框選範圍超出棋盤外緣請勿大於 1 個磚塊");
+    println!(" 2. 框好後可再調整：拖曳【框內】移動；拖曳【邊或角的方塊】縮放；");
+    println!("    方向鍵微調位置（Shift = 10 px），Ctrl+方向鍵調整右／下邊；框外拖曳 = 重畫");
+    println!(" 3. 按【Enter】或【Space】確認；【Esc】取消");
+    println!(" 4. 框選範圍超出棋盤外緣請勿大於 1 個磚塊");
     println!("{}", "=".repeat(60));
 }
 
@@ -242,7 +252,7 @@ fn finish(args: &Args, interactive: bool) {
     }
 }
 
-fn choose_monitor(args: &Args, mons: &[capture::Monitor]) -> Result<capture::Monitor> {
+fn choose_monitor(args: &Args, mons: &[capture::Monitor], default_idx: usize) -> Result<capture::Monitor> {
     if let Some(n) = args.monitor {
         return mons.iter().find(|m| m.index == n).cloned().with_context(|| format!("no monitor #{n}"));
     }
@@ -254,12 +264,12 @@ fn choose_monitor(args: &Args, mons: &[capture::Monitor]) -> Result<capture::Mon
                 m.index, m.device, if m.primary { " (主要螢幕)" } else { "" }, m.w, m.h, m.scale_percent, m.x, m.y
             );
         }
-        print!("請選擇遊戲所在的螢幕 [1-{}] (預設 1): ", mons.len());
+        print!("請選擇遊戲現在所在的螢幕 [1-{}] (預設 {}): ", mons.len(), default_idx);
         std::io::stdout().flush().ok();
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
-        let n: usize = line.trim().parse().unwrap_or(1);
-        return Ok(mons.iter().find(|m| m.index == n).unwrap_or(&mons[0]).clone());
+        let n: usize = line.trim().parse().unwrap_or(default_idx);
+        return Ok(mons.iter().find(|m| m.index == n).or_else(|| mons.iter().find(|m| m.index == default_idx)).unwrap_or(&mons[0]).clone());
     }
     Ok(mons[0].clone())
 }
@@ -273,13 +283,13 @@ fn pick_board_from_screen(args: &Args) -> Result<Option<(Image, Roi)>> {
     if mons.is_empty() {
         bail!("no monitor found");
     }
-    let mon = choose_monitor(args, &mons)?;
+    let mon = choose_monitor(args, &mons, 1)?;
     println!("[擷取] 顯示器 {}: {}x{} 實體像素, 縮放 {}%", mon.device, mon.w, mon.h, mon.scale_percent);
     let screen = capture::capture_rect(mon.x, mon.y, mon.w, mon.h)?;
 
     print_selection_help();
     let place = select::Placement { at: Some((mon.x as isize, mon.y as isize)), size: (mon.w as usize, mon.h as usize), borderless: true };
-    let rough = match select::select_roi(&screen, "Screen Snip - drag to select the board, Enter = OK, Esc = cancel", &place)? {
+    let rough = match select::select_roi(&screen, "Screen Snip - drag to select the board, Enter = OK, Esc = cancel", &place, None)? {
         Some(r) if r.w > 20 && r.h > 20 => r,
         _ => {
             println!("[取消] 未手動框選棋盤，已結束。");
@@ -315,7 +325,7 @@ fn pick_board_from_image(args: &Args) -> Result<Option<(Image, Roi)>> {
             let sc = (mw * 0.9 / img.w as f64).min(mh * 0.9 / img.h as f64).min(1.0);
             let size = (((img.w as f64 * sc) as usize).max(100), ((img.h as f64 * sc) as usize).max(100));
             let place = select::Placement { at: None, size, borderless: false };
-            match select::select_roi(&img, "Select Board ROI - drag, Enter = OK, Esc = cancel", &place)? {
+            match select::select_roi(&img, "Select Board ROI - drag, Enter = OK, Esc = cancel", &place, None)? {
                 Some(r) if r.w > 20 && r.h > 20 => {
                     println!("[ROI 手動框選] 取得大略範圍: X={}, Y={}, W={}, H={}", r.x, r.y, r.w, r.h);
                     r
@@ -332,6 +342,177 @@ fn pick_board_from_image(args: &Args) -> Result<Option<(Image, Roi)>> {
     };
     println!("[2/6] Board ROI: X={}, Y={}, W={}, H={}", roi.x, roi.y, roi.w, roi.h);
     Ok(Some((img.crop(roi.x as usize, roi.y as usize, roi.w as usize, roi.h as usize), roi)))
+}
+
+/// Rescale every template image in `dir` by (fx, fy). Returns how many files were rewritten.
+fn rescale_templates(dir: &Path, fx: f64, fy: f64) -> Result<usize> {
+    let mut n = 0;
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()) != Some("png".into()) {
+            continue;
+        }
+        let Ok(img) = image::open(&path) else { continue };
+        let img = Image::from_rgb(&img.to_rgb8());
+        let nw = ((img.w as f64 * fx).round() as usize).max(8);
+        let nh = ((img.h as f64 * fy).round() as usize).max(8);
+        if (nw, nh) == (img.w, img.h) {
+            continue;
+        }
+        // area averaging when shrinking (no aliasing), smooth interpolation when enlarging
+        let out = if nw <= img.w && nh <= img.h { imgproc::resize_area(&img, nw, nh) } else { resize(&img, nw, nh) };
+        std::fs::write(&path, export::png_bytes(&out))?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Re-aim an existing profile after the game window was moved / scaled.
+/// Rows and columns stay exactly as saved; the frame position and the cell size are re-fitted to
+/// the grid lines on screen near the user's rectangle, then the template images are rescaled to
+/// the new cell size. Everything else in the profile (rules, merged / obstacle classes) is kept.
+fn run_reroi(args: &Args) -> Result<()> {
+    use serde_json::{json, Value};
+    println!("{}", "=".repeat(60));
+    println!("      [重新對準既有 profile（視窗移動／縮放後）]");
+    println!("{}", "=".repeat(60));
+    if !args.profile.is_file() {
+        bail!("找不到既有設定檔 {:?}。請先建立 profile。", args.profile);
+    }
+    let mut prof: Value = serde_json::from_slice(&std::fs::read(&args.profile)?)?;
+    let b = &prof["board"];
+    let rows = b["rows"].as_i64().context("profile 缺少 board.rows")? as usize;
+    let cols = b["cols"].as_i64().context("profile 缺少 board.cols")? as usize;
+    let g = |k: &str| b["roi"][k].as_i64().with_context(|| format!("profile 缺少 board.roi.{k}"));
+    let old = Roi { x: g("x")?, y: g("y")?, w: g("width")?, h: g("height")? };
+    let (ocw, och) = (old.w as f64 / cols as f64, old.h as f64 / rows as f64);
+    println!("[保留] 網格 {} 列 x {} 欄；目前 ROI: X={}, Y={}, W={}, H={}（格 {:.2} x {:.2}）", rows, cols, old.x, old.y, old.w, old.h, ocw, och);
+
+    let mons = capture::monitors();
+    if mons.is_empty() {
+        bail!("no monitor found");
+    }
+    // default to the monitor holding the old ROI's centre
+    let (cx, cy) = (old.x + old.w / 2, old.y + old.h / 2);
+    let holder = mons
+        .iter()
+        .find(|m| cx >= m.x as i64 && cx < m.x as i64 + m.w as i64 && cy >= m.y as i64 && cy < m.y as i64 + m.h as i64)
+        .cloned();
+    // The game may have been moved to ANOTHER monitor: always let the user pick the current one
+    // (default = where the saved ROI was).
+    let def = holder.as_ref().map(|m| m.index).unwrap_or(1);
+    let mon = choose_monitor(args, &mons, def)?;
+    println!("[擷取] 顯示器 {}: {}x{} 實體像素, 縮放 {}%", mon.device, mon.w, mon.h, mon.scale_percent);
+    let screen = capture::capture_rect(mon.x, mon.y, mon.w, mon.h)?;
+    println!("紅黃框是舊位置。請拖到新的棋盤上，大小只需大略框住（可比棋盤外緣大不超過 1 個磚塊），");
+    println!("程式會依原本的 {} 列 x {} 欄自動算出精準外框與新的格子大小。", rows, cols);
+    print_selection_help();
+    let on_this = holder.as_ref().map(|m| m.index == mon.index).unwrap_or(false);
+    let initial = if on_this {
+        Roi { x: old.x - mon.x as i64, y: old.y - mon.y as i64, w: old.w, h: old.h }
+    } else {
+        // different monitor: same physical size corrected for the DPI difference, centred as a starting point
+        let from = holder.as_ref().map(|m| m.scale_percent as f64).unwrap_or(mon.scale_percent as f64);
+        let k = mon.scale_percent as f64 / from.max(1.0);
+        let (w, h) = (((old.w as f64 * k) as i64).min(mon.w as i64 - 20), ((old.h as f64 * k) as i64).min(mon.h as i64 - 20));
+        println!("[提示] 舊 ROI 不在這個螢幕上，已用相近大小（縮放 x{:.2}）放在畫面中央，請拖到棋盤上。", k);
+        Roi { x: (mon.w as i64 - w) / 2, y: (mon.h as i64 - h) / 2, w, h }
+    };
+    let place = select::Placement {
+        at: Some((mon.x as isize, mon.y as isize)),
+        size: (mon.w as usize, mon.h as usize),
+        borderless: true,
+    };
+    let rough = match select::select_roi(&screen, "Re-aim ROI - move / resize roughly, Enter = OK, Esc = cancel", &place, Some(initial))? {
+        Some(r) if r.w > 20 && r.h > 20 => r,
+        _ => {
+            println!("[取消] 未更動 profile。");
+            return Ok(());
+        }
+    };
+    println!("[大略範圍] X={}, Y={}, W={}, H={}", rough.x, rough.y, rough.w, rough.h);
+
+    let fit = calibrate::fit_known_grid(&screen, rough, rows, cols);
+    println!("[格線貼合] 第一步（依格線）: X={}, Y={}, W={}, H={}（可信度 {:.0}%）", fit.roi.x, fit.roi.y, fit.roi.w, fit.roi.h, fit.confidence * 100.0);
+    if fit.confidence < 0.35 {
+        println!("[警告] 貼合可信度偏低：畫面上的格線不明顯，或框選位置離棋盤太遠。建議重新執行並把框拖得更貼近棋盤。");
+    }
+
+    // template folder + the existing object library (loaded BEFORE rescaling: it is the reference for "does this tile match")
+    let tdir = {
+        let rel = prof["matcher"]["template_dir"].as_str().unwrap_or("templates").to_string();
+        let base = args.profile.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        let cand = base.join(&rel);
+        if cand.is_dir() { cand } else { args.templates.clone() }
+    };
+    let pdir = std::fs::canonicalize(&args.profile).ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."));
+    let library = if tdir.is_dir() { augment::load_library(&prof, &pdir, &tdir).ok().map(|l| l.0) } else { None };
+
+    // second step: choose, among small shifts / size changes, the frame under which the tiles match the known objects best
+    let mut froi = fit.roi;
+    if let Some(lib) = &library {
+        froi = augment::refine_frame(&screen, fit.roi, rows, cols, lib);
+        println!("[比對微調] 以磚塊比對結果微調: X={}, Y={}, W={}, H={}", froi.x, froi.y, froi.w, froi.h);
+    }
+    let nroi = Roi { x: mon.x as i64 + froi.x, y: mon.y as i64 + froi.y, w: froi.w, h: froi.h };
+    let (ncw, nch) = (froi.w as f64 / cols as f64, froi.h as f64 / rows as f64);
+    println!("[最終] ROI: X={}, Y={}, W={}, H={}（格 {:.2} x {:.2}）", nroi.x, nroi.y, nroi.w, nroi.h, ncw, nch);
+    let (fx, fy) = (ncw / ocw, nch / och);
+    println!("[縮放比例] 水平 x{:.3}，垂直 x{:.3}（相對原本的格子大小）", fx, fy);
+
+    // preview crop of the fitted board so the user can check it
+    let board = screen.crop(froi.x as usize, froi.y as usize, froi.w as usize, froi.h as usize);
+    std::fs::write(&args.screenshot, export::png_bytes(&board))?;
+    println!("[儲存] 貼合後的盤面截圖存至 {:?}（可開啟確認外框是否正確）", args.screenshot);
+
+    let r2 = |v: f64| (v * 100.0).round() / 100.0;
+    let patch = |v: &mut Value| {
+        let b = &mut v["board"];
+        b["roi"] = json!({"x": nroi.x, "y": nroi.y, "width": nroi.w, "height": nroi.h});
+        b["cell_size"] = json!({"w": r2(ncw), "h": r2(nch)});
+        b["offset"] = json!({"x": nroi.x, "y": nroi.y});
+    };
+
+    // template images: scale to the new cell size, then overwrite known objects with samples of the live board
+    if tdir.is_dir() {
+        let n = rescale_templates(&tdir, fx, fy)?;
+        println!("[模板] 已依比例縮放 {} 張參照圖：{:?}", n, tdir);
+        if let Some(lib) = &library {
+            let rs = augment::resample_templates(&board, rows, cols, lib, &tdir)?;
+            println!(
+                "[即時取樣] 磚塊 {} 格中有 {} 格比對到既有物件（平均相似度 {:.2}）；{} 種物件的參照圖已換成目前畫面的樣本",
+                rs.tiles, rs.known, rs.avg_sim, rs.updated_ids.len()
+            );
+            if rs.tiles > 0 && (rs.known as f64) < 0.8 * rs.tiles as f64 {
+                println!("[警告] 只有 {:.0}% 的磚塊比對得到既有物件：外框可能沒對準棋盤，或這個關卡出現新物件（可再用「追加截圖」補入）。", 100.0 * rs.known as f64 / rs.tiles as f64);
+            }
+        }
+    } else {
+        println!("[模板] 找不到模板資料夾 {:?}，略過縮放。", tdir);
+    }
+
+    patch(&mut prof);
+    std::fs::write(&args.profile, serde_json::to_string_pretty(&prof)?)?;
+    println!("[儲存] 已更新 {:?}（列／欄數與其餘設定不變）", args.profile);
+
+    // keep the editable preview in sync, otherwise its "download profile" button would bring the old ROI back
+    if args.preview.is_file() {
+        let html = std::fs::read_to_string(&args.preview)?;
+        if let (Some(a), Some(e)) = (html.find("const D = "), html.find(";\nconst KEY")) {
+            let a = a + "const D = ".len();
+            if a < e {
+                if let Ok(mut d) = serde_json::from_str::<Value>(&html[a..e]) {
+                    patch(&mut d["profile"]);
+                    let out = format!("{}{}{}", &html[..a], serde_json::to_string(&d)?, &html[e..]);
+                    std::fs::write(&args.preview, out)?;
+                    println!("[同步] 已同步 {:?} 內的 ROI", args.preview);
+                }
+            }
+        }
+    }
+    println!("{}", "=".repeat(60));
+    println!("完成。engine 下次啟動就會使用新的 ROI 與縮放後的模板。");
+    Ok(())
 }
 
 fn run_snip(args: &Args) -> Result<()> {
@@ -417,7 +598,9 @@ fn run() -> Result<()> {
     if args.selftest {
         return self_test_window();
     }
-    if args.add {
+    if args.reroi {
+        run_reroi(&args)
+    } else if args.add {
         run_add(&args)
     } else if args.snip {
         run_snip(&args)

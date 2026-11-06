@@ -29,6 +29,7 @@ struct EngineArgs {
     profile_path: PathBuf,
     templates_dir: Option<PathBuf>,
     dry_run: bool,
+    check: bool,
     no_prompt: bool,
     max_moves: Option<usize>,
     move_delay_ms: u64,
@@ -39,6 +40,7 @@ fn parse_args() -> EngineArgs {
     let mut profile_path = PathBuf::from("game_profile.json");
     let mut templates_dir = None;
     let mut dry_run = false;
+    let mut check = false;
     let mut no_prompt = false;
     let mut max_moves = None;
     let mut move_delay_ms = 50;
@@ -60,6 +62,9 @@ fn parse_args() -> EngineArgs {
             }
             "--dry-run" => {
                 dry_run = true;
+            }
+            "--check" => {
+                check = true;
             }
             "--no-prompt" => {
                 no_prompt = true;
@@ -85,6 +90,7 @@ fn parse_args() -> EngineArgs {
         profile_path,
         templates_dir,
         dry_run,
+        check,
         no_prompt,
         max_moves,
         move_delay_ms,
@@ -123,14 +129,6 @@ fn create_sample_profile_if_missing(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Block until the user presses Enter (keeps the console window open at the end).
-fn wait_for_enter(msg: &str) {
-    println!("
-{}", msg);
-    let mut line = String::new();
-    let _ = std::io::stdin().read_line(&mut line);
-}
-
 /// Wait (global hotkey, works while the game window has focus) for F8 to start.
 /// Returns false if the user pressed ESC to cancel.
 fn wait_for_start() -> bool {
@@ -161,24 +159,97 @@ fn wait_for_start() -> bool {
     }
 }
 
-fn main() {
-    let args = parse_args();
-    let result = run(&args);
-    let code = match &result {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("
-[Engine] 發生錯誤: {:?}", e);
-            1
-        }
-    };
-    if !args.no_prompt {
-        wait_for_enter("引擎已結束。請確認上方訊息後，按 [Enter] 關閉視窗...");
+/// After a run ends: wait for F8 (run again) or ESC (close). Returns true to run again.
+fn wait_for_restart() -> bool {
+    println!();
+    println!("────────────────────────────────────────────────────────");
+    println!(" 引擎已結束。請確認上方訊息。");
+    println!(" 按 [F8] 重新開始（請先切到遊戲視窗），按 [ESC] 關閉。");
+    println!("────────────────────────────────────────────────────────");
+    while check_key_pressed(VK_F8) || check_key_pressed(VK_ESCAPE) {
+        sleep(Duration::from_millis(20));
     }
+    loop {
+        if check_key_pressed(VK_ESCAPE) {
+            return false;
+        }
+        if check_key_pressed(VK_F8) {
+            while check_key_pressed(VK_F8) {
+                sleep(Duration::from_millis(20));
+            }
+            println!("[Engine] 重新開始！（F8 暫停/繼續，ESC 結束）");
+            sleep(Duration::from_millis(300));
+            return true;
+        }
+        sleep(Duration::from_millis(30));
+    }
+}
+
+fn main() {
+    engine::capture::enable_dpi_awareness();
+    let args = parse_args();
+    let mut skip_start = false;
+    let code = loop {
+        let result = run(&args, skip_start);
+        let code = match &result {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("
+[Engine] 發生錯誤: {:?}", e);
+                1
+            }
+        };
+        if args.no_prompt || !wait_for_restart() {
+            break code;
+        }
+        skip_start = true; // the F8 just pressed already served as the start gate
+    };
     std::process::exit(code);
 }
 
-fn run(args: &EngineArgs) -> Result<()> {
+/// `--check`: capture the board once (no clicks), save an annotated picture and print what was recognised.
+fn run_check(profile: &GameProfile, matcher: &Matcher, capturer: &mut dyn engine::capture::ScreenCapturer) -> Result<()> {
+    let roi = &profile.board.roi;
+    let img = capturer.capture_roi(roi.x, roi.y, roi.width, roi.height)?;
+    println!("[Check] 擷取 ROI ({}, {}, {}x{}) -> 實際取得 {}x{}", roi.x, roi.y, roi.width, roi.height, img.width(), img.height());
+    let (rows, cols) = (profile.board.rows, profile.board.cols);
+    let board = matcher.match_board_image(&img, rows, cols)?;
+    let mut out = image::RgbaImage::from_raw(img.width(), img.height(), img.as_raw().clone()).unwrap();
+    let (cw, ch) = (img.width() as f64 / cols as f64, img.height() as f64 / rows as f64);
+    let (mut tiles, mut empty, mut obst, mut unk) = (0, 0, 0, 0);
+    for r in 0..rows {
+        for c in 0..cols {
+            let id = board.get(r as i32, c as i32).unwrap_or(engine::board::UNKNOWN);
+            let col = match id {
+                EMPTY => { empty += 1; [60, 120, 255, 255] }
+                engine::board::OBSTACLE => { obst += 1; [255, 160, 0, 255] }
+                engine::board::UNKNOWN => { unk += 1; [255, 0, 0, 255] }
+                _ => { tiles += 1; [0, 220, 0, 255] }
+            };
+            let (x0, y0) = ((c as f64 * cw) as u32, (r as f64 * ch) as u32);
+            let (x1, y1) = ((((c + 1) as f64 * cw) as u32).min(img.width() - 1), (((r + 1) as f64 * ch) as u32).min(img.height() - 1));
+            for x in x0..=x1 {
+                out.put_pixel(x, y0, image::Rgba(col));
+                out.put_pixel(x, y1, image::Rgba(col));
+            }
+            for y in y0..=y1 {
+                out.put_pixel(x0, y, image::Rgba(col));
+                out.put_pixel(x1, y, image::Rgba(col));
+            }
+        }
+    }
+    out.save("engine_check.png")?;
+    println!("[Check] 磚塊 {} 格 / 空格 {} / 障礙物 {} / 無法辨識 {}", tiles, empty, obst, unk);
+    println!("[Check] 已存 engine_check.png：綠框=已辨識磚塊、藍=空格、橘=障礙物、紅=無法辨識。請開啟確認格線是否對齊棋盤。");
+    for r in 0..rows {
+        let line: Vec<String> = (0..cols).map(|c| format!("{:>2}", board.get(r as i32, c as i32).unwrap_or(engine::board::UNKNOWN))).collect();
+        println!("  {}", line.join(" "));
+    }
+    println!("[Check] (0 = 空格, -1 = 障礙物, -2 = 無法辨識)");
+    Ok(())
+}
+
+fn run(args: &EngineArgs, skip_start: bool) -> Result<()> {
     println!("========================================================");
     println!(" LianLianKan (連連看) Ultra-Fast Visual Solver Engine  ");
     println!(" Hotkeys: [F8] Start/Pause/Resume | [ESC] Exit        ");
@@ -236,9 +307,13 @@ fn run(args: &EngineArgs) -> Result<()> {
         println!("[Engine] Running in DRY-RUN mode (no mouse clicks injected)");
     }
 
-    if !args.no_prompt && !wait_for_start() {
+    if !args.no_prompt && !skip_start && !wait_for_start() {
         println!("[Engine] 已取消，未開始執行。");
         return Ok(());
+    }
+
+    if args.check {
+        return run_check(&profile, &matcher, &mut *capturer);
     }
 
     let mut paused = false;
