@@ -169,7 +169,10 @@ def generate_html_report(
     empty_cells,
     obstacle_cells,
     all_cells_matrix,
-    output_html="preview.html"
+    output_html="preview.html",
+    rows=None,
+    cols=None,
+    augment=False
 ):
     """
     Writes an *editable* single-file HTML (no external dependency):
@@ -178,8 +181,10 @@ def generate_html_report(
       * live parity check, edits kept in localStorage, import/export of the edit config
       * downloads the edited game_profile.json (replace the one next to the engine)
     """
-    rows = profile["board"]["rows"]
-    cols = profile["board"]["cols"]
+    # rows/cols default to the profile; "augment" mode shows a different screenshot whose
+    # grid may differ from the profile's, and only lists the objects found in it.
+    rows = rows if rows is not None else profile["board"]["rows"]
+    cols = cols if cols is not None else profile["board"]["cols"]
 
     coord_map = {}
     for ec in empty_cells:
@@ -201,6 +206,7 @@ def generate_html_report(
     data = {
         "rows": rows,
         "cols": cols,
+        "augment": bool(augment),
         "profile": profile,
         "cells": cells,
         "templates": [{"id": t["id"], "file": t["file"], "img": to_base64_src(t["image"])}
@@ -349,10 +355,11 @@ function setMerge(id,v){
 function render(){
   const cn=counts(), m=cn.m;
   document.getElementById("dim").textContent = D.rows+" 列 × "+D.cols+" 欄";
-  const odd = Object.keys(m).filter(k=>m[k]%2);
+  const odd = D.augment ? [] : Object.keys(m).filter(k=>m[k]%2);
   const p=document.getElementById("parity");
   p.className="badge "+(odd.length?"fail":"pass");
-  p.textContent = odd.length ? "奇偶檢查未通過（類別 "+odd.join(", ")+" 為奇數）" : "奇偶檢查通過";
+  p.textContent = D.augment ? "追加模式：僅列出本次截圖中出現的物件（新物件已接續編號）"
+    : (odd.length ? "奇偶檢查未通過（類別 "+odd.join(", ")+" 為奇數）" : "奇偶檢查通過");
   const tiles=Object.values(m).reduce((a,b)=>a+b,0);
   document.getElementById("stats").innerHTML = "<span>磚塊："+tiles+"</span><span>類別數："+Object.keys(m).length+"</span><span>空格："+cn.e+"</span><span>障礙物："+cn.o+"</span>";
   document.getElementById("selN").textContent = sel.size;
@@ -374,8 +381,8 @@ function render(){
     const targets = D.templates.filter(x=>x.id!==t.id && state.merge[x.id]==null && !state.obstacle[x.id]);
     const absorbed = D.templates.filter(x=>x.id!==t.id && root(x.id)===t.id).map(x=>"T"+x.id);
     const status = merged ? "已合併到 T"+root(t.id)
-      : "目前數量：<b>"+n+"</b>"+(n%2?" ⚠奇數":"")+(absorbed.length?"（含 "+absorbed.join(", ")+"）":"");
-    return '<div class="card'+((!merged&&n%2)?" odd":"")+(merged?" merged":"")+'">'
+      : "本張數量：<b>"+n+"</b>"+((!D.augment&&n%2)?" ⚠奇數":"")+(absorbed.length?"（含 "+absorbed.join(", ")+"）":"");
+    return '<div class="card'+((!D.augment&&!merged&&n%2)?" odd":"")+(merged?" merged":"")+'">'
      +'<img src="'+t.img+'" onclick="pickClass('+t.id+')" title="點擊高亮並選取此類別所有格子">'
      +'<div class="f"><b>tile_'+pad(t.id)+' (ID '+t.id+')</b><span>'+status+'</span>'
      +'<label>用途 <select onchange="setRole('+t.id+',this.value)"><option value="tile">一般磚塊</option><option value="obstacle"'+(state.obstacle[t.id]?' selected':'')+'>障礙物</option></select></label>'

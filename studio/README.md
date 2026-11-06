@@ -27,6 +27,10 @@ The Visual Calibration, Slicing, Feature Extraction, Clustering, and Template Ex
   - Exports `game_profile.json` strictly matching the Rust solver engine schema.
   - Generates a local, self-contained HTML inspection dashboard (`preview.html`).
 
+- **`augment.py`**:
+  - Adds objects from another screenshot (later levels introduce new objects). Cells are compared with every existing template; only objects that match nothing are clustered and appended with new ids (max id + 1). Existing ids are never renumbered.
+  - Usage: menu option `[3]`, or `main.py --add --image level2.png` / `main.py --add --snip`. Updates `game_profile.json` + `templates/` and regenerates `preview.html` (merge / obstacle editing still available).
+
 - **`main.py`**:
   - End-to-end studio CLI orchestrator.
 

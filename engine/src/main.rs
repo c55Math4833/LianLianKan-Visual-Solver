@@ -29,6 +29,7 @@ struct EngineArgs {
     profile_path: PathBuf,
     templates_dir: Option<PathBuf>,
     dry_run: bool,
+    no_prompt: bool,
     max_moves: Option<usize>,
     move_delay_ms: u64,
 }
@@ -38,6 +39,7 @@ fn parse_args() -> EngineArgs {
     let mut profile_path = PathBuf::from("game_profile.json");
     let mut templates_dir = None;
     let mut dry_run = false;
+    let mut no_prompt = false;
     let mut max_moves = None;
     let mut move_delay_ms = 50;
 
@@ -58,6 +60,9 @@ fn parse_args() -> EngineArgs {
             }
             "--dry-run" => {
                 dry_run = true;
+            }
+            "--no-prompt" => {
+                no_prompt = true;
             }
             "--max-moves" => {
                 if i + 1 < args.len() {
@@ -80,6 +85,7 @@ fn parse_args() -> EngineArgs {
         profile_path,
         templates_dir,
         dry_run,
+        no_prompt,
         max_moves,
         move_delay_ms,
     }
@@ -117,13 +123,66 @@ fn create_sample_profile_if_missing(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
+/// Block until the user presses Enter (keeps the console window open at the end).
+fn wait_for_enter(msg: &str) {
+    println!("
+{}", msg);
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+}
+
+/// Wait (global hotkey, works while the game window has focus) for F8 to start.
+/// Returns false if the user pressed ESC to cancel.
+fn wait_for_start() -> bool {
+    println!();
+    println!("────────────────────────────────────────────────────────");
+    println!(" 準備完成，尚未開始。");
+    println!(" 請先切換到遊戲視窗，確認棋盤完整顯示、沒有被本視窗擋住，");
+    println!(" 然後按 [F8] 開始（按 [ESC] 取消）。");
+    println!("────────────────────────────────────────────────────────");
+    // Ignore keys that are still held down from before.
+    while check_key_pressed(VK_F8) || check_key_pressed(VK_ESCAPE) {
+        sleep(Duration::from_millis(20));
+    }
+    loop {
+        if check_key_pressed(VK_ESCAPE) {
+            return false;
+        }
+        if check_key_pressed(VK_F8) {
+            // Release first, otherwise the main loop would read the same press as "pause".
+            while check_key_pressed(VK_F8) {
+                sleep(Duration::from_millis(20));
+            }
+            println!("[Engine] 開始執行！（F8 暫停/繼續，ESC 結束）");
+            sleep(Duration::from_millis(300));
+            return true;
+        }
+        sleep(Duration::from_millis(30));
+    }
+}
+
+fn main() {
+    let args = parse_args();
+    let result = run(&args);
+    let code = match &result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("
+[Engine] 發生錯誤: {:?}", e);
+            1
+        }
+    };
+    if !args.no_prompt {
+        wait_for_enter("引擎已結束。請確認上方訊息後，按 [Enter] 關閉視窗...");
+    }
+    std::process::exit(code);
+}
+
+fn run(args: &EngineArgs) -> Result<()> {
     println!("========================================================");
     println!(" LianLianKan (連連看) Ultra-Fast Visual Solver Engine  ");
-    println!(" Hotkeys: [F8] Pause/Resume  |  [ESC] Exit Engine       ");
+    println!(" Hotkeys: [F8] Start/Pause/Resume | [ESC] Exit        ");
     println!("========================================================");
-
-    let args = parse_args();
 
     create_sample_profile_if_missing(&args.profile_path)?;
     let profile = GameProfile::load_from_file(&args.profile_path)
@@ -131,6 +190,7 @@ fn main() -> Result<()> {
 
     let tmpl_dir = args
         .templates_dir
+        .clone()
         .unwrap_or_else(|| PathBuf::from(&profile.matcher.template_dir));
 
     let mut matcher = Matcher::new(MatcherConfig {
@@ -174,6 +234,11 @@ fn main() -> Result<()> {
     );
     if args.dry_run {
         println!("[Engine] Running in DRY-RUN mode (no mouse clicks injected)");
+    }
+
+    if !args.no_prompt && !wait_for_start() {
+        println!("[Engine] 已取消，未開始執行。");
+        return Ok(());
     }
 
     let mut paused = false;

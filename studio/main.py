@@ -23,6 +23,7 @@ from grid_calibrator import (
 from feature_extractor import extract_features, classify_cells
 from clusterer import cluster_matchable_tiles
 from exporter import export_all
+from augment import augment_from_board
 from screen_capturer import (
     get_system_monitors,
     capture_screen
@@ -190,21 +191,12 @@ def run_studio_pipeline(
     print("=" * 60)
     return profile
 
-def run_screen_snip_mode(
-    monitor_index=None,
-    output_screenshot="screenshot_board.png",
-    open_browser=True,
-    output_templates="templates",
-    output_profile="game_profile.json",
-    output_preview="preview.html"
-):
+def select_board_from_screen(monitor_index=None, output_screenshot="screenshot_board.png"):
     """
-    Mode 3: Live Screen Snip with Snap-to-Grid Alignment
+    Capture a monitor, let the user drag-select the board, snap to the tile lattice.
+    Returns (cropped_board_bgr, phys_roi) or None when cancelled.
+    phys_roi is the board rectangle in virtual-desktop physical pixels.
     """
-    print("\n" + "=" * 60)
-    print("      [模式 1：螢幕直接框選截圖 (多螢幕 & 高 DPI 支援)]")
-    print("=" * 60)
-    
     monitors = get_system_monitors()
     chosen_monitor = None
     
@@ -277,6 +269,30 @@ def run_screen_snip_mode(
     phys_y = chosen_monitor['rect'][1] + fy
     print(f"[實體座標] 虛擬桌面絕對實體座標: X={phys_x}, Y={phys_y}, W={fw}, H={fh}")
 
+    return cropped_board, {"x": phys_x, "y": phys_y, "w": fw, "h": fh}
+
+def run_screen_snip_mode(
+    monitor_index=None,
+    output_screenshot="screenshot_board.png",
+    open_browser=True,
+    output_templates="templates",
+    output_profile="game_profile.json",
+    output_preview="preview.html"
+):
+    """
+    Mode 3: Live Screen Snip with Snap-to-Grid Alignment
+    """
+    print("\n" + "=" * 60)
+    print("      [模式 1：螢幕直接框選截圖 (多螢幕 & 高 DPI 支援)]")
+    print("=" * 60)
+    
+    sel = select_board_from_screen(monitor_index, output_screenshot)
+    if sel is None:
+        return None
+    cropped_board, phys = sel
+    fw, fh = phys["w"], phys["h"]
+    phys_x, phys_y = phys["x"], phys["y"]
+
     return run_studio_pipeline(
         image_input=cropped_board,
         roi_override={"x": 0, "y": 0, "w": fw, "h": fh},
@@ -340,9 +356,103 @@ def run_existing_image_mode(
         output_preview=output_preview
     )
 
+def select_board_from_image(image_path):
+    """Open an image file, let the user drag-select the board, snap to the lattice.
+    Returns the cropped board (BGR) or None when cancelled."""
+    img = load_image(image_path)
+    if img is None:
+        raise ValueError(f"無法讀取圖片: {image_path}")
+    print("=" * 60)
+    print(" [ROI 框選提示]")
+    print(" 1. 請使用滑鼠左鍵【拖曳框選】棋盤，系統會自動磁吸對齊磚塊外緣")
+    print(" 2. 框選完成後按【SPACE】或【ENTER】確認")
+    print(" 3. 框選範圍超出棋盤外緣請勿大於 1 個磚塊")
+    print("=" * 60)
+    cv_roi = cv2.selectROI("Select Board ROI", img, fromCenter=False, showCrosshair=True)
+    cv2.destroyAllWindows()
+    if not (cv_roi[2] > 20 and cv_roi[3] > 20):
+        print("[取消] 未手動框選棋盤。")
+        return None
+    rough = {"x": int(cv_roi[0]), "y": int(cv_roi[1]), "w": int(cv_roi[2]), "h": int(cv_roi[3])}
+    roi = refine_board_roi(img, rough)
+    return img[roi["y"]:roi["y"] + roi["h"], roi["x"]:roi["x"] + roi["w"]]
+
+def run_add_objects_mode(
+    image_path=None,
+    use_screen=None,
+    monitor_index=None,
+    open_browser=True,
+    output_templates="templates",
+    output_profile="game_profile.json",
+    output_preview="preview.html"
+):
+    """
+    Mode 3: add new objects from another screenshot (later levels bring new objects).
+    Existing template ids are kept; only objects not yet in the library are appended.
+    """
+    print()
+    print("=" * 60)
+    print("      [模式 3：追加截圖（補充新關卡出現的新物件）]")
+    print("=" * 60)
+    if not os.path.exists(output_profile):
+        print(f"[錯誤] 找不到既有設定檔 {output_profile}。請先用模式 1 或 2 建立第一份 profile 與 templates。")
+        return None
+
+    if image_path is None and use_screen is None:
+        print(" 新截圖來源：")
+        print("  [1] 螢幕框選（即時擷取螢幕）")
+        print("  [2] 讀取現有截圖檔案")
+        try:
+            choice = input("請選擇 [1/2] (預設 1): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print("已取消。")
+            return None
+        use_screen = (choice != "2")
+        if not use_screen:
+            try:
+                image_path = input("請輸入或拖曳圖片路徑: ").strip().strip('"').strip("'")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                print("已取消。")
+                return None
+
+    if image_path:
+        if not os.path.exists(image_path):
+            print(f"[錯誤] 找不到檔案: {image_path}")
+            return None
+        board = select_board_from_image(image_path)
+    else:
+        sel = select_board_from_screen(monitor_index, "screenshot_board_add.png")
+        board = sel[0] if sel else None
+    if board is None:
+        return None
+
+    summary = augment_from_board(
+        board,
+        profile_path=output_profile,
+        templates_dir=output_templates,
+        preview_path=output_preview,
+    )
+    print("=" * 60)
+    print(f"本張截圖：{summary['rows']} 列 x {summary['cols']} 欄，磚塊 {summary['tiles']} 格")
+    print(f"  已知物件：{summary['known']} 格（沿用原本編號）")
+    if summary["new_ids"]:
+        print(f"  新增物件：{len(summary['new_ids'])} 種")
+        for nid, cnt in zip(summary["new_ids"], summary["new_counts"]):
+            print(f"    - 新編號 {nid}: 本張出現 {cnt} 格 -> {output_templates}/{nid}.png")
+        print(f"已更新 {output_profile}；請開啟 {output_preview} 檢查，若新物件被誤分成多類，可在網頁中合併。")
+    else:
+        print("  沒有發現新物件，模板庫維持不變。")
+    print("=" * 60)
+    if open_browser:
+        webbrowser.open("file:///" + os.path.abspath(output_preview))
+    return summary
+
 def main():
     parser = argparse.ArgumentParser(description="LianLianKan Visual Studio")
     parser.add_argument("--snip", "-s", action="store_true", help="Launch interactive screen snip mode")
+    parser.add_argument("--add", action="store_true", help="Add new objects from another screenshot to the existing profile/templates (use --image FILE, or --snip for the screen)")
     parser.add_argument("--monitor", "-m", type=int, default=None, help="Target monitor index (1-based)")
     parser.add_argument("--image", "-i", type=str, default=None, help="Path to input screenshot image")
     parser.add_argument("--roi", nargs=4, type=int, metavar=('X', 'Y', 'W', 'H'), help="Manual ROI bounding box")
@@ -360,8 +470,19 @@ def main():
         if os.path.exists(candidate) and os.path.isfile(candidate):
             dragged_file = candidate
 
+    # 3. Add objects from another screenshot
+    if args.add:
+        run_add_objects_mode(
+            image_path=args.image if args.image else dragged_file,
+            use_screen=True if args.snip else None,
+            monitor_index=args.monitor,
+            open_browser=not args.no_browser,
+            output_templates=args.templates,
+            output_profile=args.profile,
+            output_preview=args.preview
+        )
     # 1. Screen Snip Mode
-    if args.snip:
+    elif args.snip:
         run_screen_snip_mode(
             monitor_index=args.monitor,
             open_browser=not args.no_browser,
@@ -397,16 +518,25 @@ def main():
         print("請選擇分析模式：")
         print("  [1] 螢幕框選截圖 (滑鼠手動框選棋盤，框選範圍超出棋盤勿大於 1 個磚塊)")
         print("  [2] 讀取現有截圖檔案 (支援拖曳圖片，並手動框選棋盤)")
+        print("  [3] 追加截圖 (新關卡出現新物件時，把新物件補進現有模板庫)")
         print("=" * 60)
 
         try:
-            choice = input("請選擇模式 [1/2] (預設 1): ").strip()
+            choice = input("請選擇模式 [1/2/3] (預設 1): ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             print("已取消。")
             return
 
-        if choice == "2":
+        if choice == "3":
+            run_add_objects_mode(
+                monitor_index=args.monitor,
+                open_browser=not args.no_browser,
+                output_templates=args.templates,
+                output_profile=args.profile,
+                output_preview=args.preview
+            )
+        elif choice == "2":
             run_existing_image_mode(
                 open_browser=not args.no_browser,
                 output_templates=args.templates,
