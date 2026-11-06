@@ -74,7 +74,7 @@ jobs:
       - name: Package Studio into Standalone EXE with PyInstaller
         working-directory: studio
         run: |
-          uv run pyinstaller --onefile --clean --name studio --exclude-module PyQt5 --exclude-module PyQt6 --exclude-module tkinter --exclude-module unittest --exclude-module test --exclude-module pydoc --exclude-module email --exclude-module xmlrpc --exclude-module multiprocessing --exclude-module sqlite3 --exclude-module curses --exclude-module lib2to3 --exclude-module distutils main.py
+          uv run pyinstaller --clean --noconfirm studio.spec
 
       - name: Upload Studio Artifact
         uses: actions/upload-artifact@v4
