@@ -47,40 +47,33 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------
-  # Job 2: Build Python Studio (uv + PyInstaller)
+  # Job 2: Build Rust Studio (modeling tool)
   # -------------------------------------------------------------
-  build-python:
-    name: Build Python Studio
+  build-studio:
+    name: Build Rust Studio
     runs-on: windows-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: '3.13'
+          targets: x86_64-pc-windows-msvc
 
-      - name: Setup uv Package Manager
-        uses: astral-sh/setup-uv@v5
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          enable-cache: true
-          version: 'latest'
+          workspaces: studio
 
-      - name: Install Studio Dependencies with uv
-        working-directory: studio
-        run: uv sync
-
-      - name: Package Studio into Standalone EXE with PyInstaller
-        working-directory: studio
-        run: |
-          uv run pyinstaller --clean --noconfirm studio.spec
+      - name: Build Standalone Release Binary
+        run: cargo build --release --manifest-path studio/Cargo.toml --target x86_64-pc-windows-msvc
 
       - name: Upload Studio Artifact
         uses: actions/upload-artifact@v4
         with:
           name: studio-artifact
-          path: studio/dist/studio.exe
+          path: studio/target/x86_64-pc-windows-msvc/release/studio.exe
           if-no-files-found: error
 
   # -------------------------------------------------------------
@@ -88,7 +81,7 @@ jobs:
   # -------------------------------------------------------------
   package-release:
     name: Package Release ZIP
-    needs: [build-rust, build-python]
+    needs: [build-rust, build-studio]
     runs-on: windows-latest
     steps:
       - name: Checkout Repository
@@ -110,7 +103,6 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item "README.md" -Destination "bundle/"
-          Copy-Item "start.bat" -Destination "bundle/"
           if (Test-Path "data/未命名.jpg") {
             New-Item -ItemType Directory -Path "bundle/data" -Force | Out-Null
             Copy-Item "data/未命名.jpg" -Destination "bundle/data/"

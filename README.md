@@ -1,7 +1,7 @@
 # LianLianKan Visual Solver (連連看通用視覺解題器)
 
 基於「分離式架構（Studio-Engine Pattern）」設計的通用型連連看自動解題套件：
-- **Studio (Python)**：離線建模工具，負責自適應網格訊號分析、特徵萃取、無監督分群與樣本庫建立（使用 `uv` 管理、零 Qt 依賴）。
+- **Studio (Rust)**：離線建模工具，負責滑鼠框選、自適應網格訊號分析、特徵分類、無監督分群與樣本庫建立，並可追加新關卡的新物件（單一執行檔約 2 MB，不依賴 Python／OpenCV）。
 - **Engine (Rust)**：在線執行引擎，基於 DirectX DXGI Desktop Duplication 硬體截圖（<3ms 延遲）、三段線尋路核心、Win32 `SendInput` 點擊注入與狀態驗證閉環（靜態 CRT 編譯，免安裝運行庫）。
 
 ---
@@ -14,7 +14,7 @@
             ┌───────────────┴───────────────┐
             ▼                               ▼
     【Studio 建模工具】              【Engine 求解引擎】
-     (Python / PyInstaller)          (Rust / 靜態 CRT)
+        (Rust)                      (Rust / 靜態 CRT)
 ┌───────────────────────────┐   ┌───────────────────────────┐
 │ 1. 使用者選定/框選 ROI    │   │ 1. DXGI 截圖 (<3ms)       │
 │ 2. 自適應網格週期偵測     │   │ 2. NCC 模板快速矩陣化     │
@@ -32,7 +32,7 @@
 
 本專案配置了完整 CI/CD 工作流 (`.github/workflows/build.yml`)：
 - **Rust Engine**：在 Windows runner 上透過 `cargo build --release` 編譯為獨立 `engine.exe`。
-- **Python Studio**：透過 `uv` 與 `pyinstaller` 打包為單一獨立 `studio.exe`。
+- **Rust Studio**：透過 `cargo build --release` 編譯為單一獨立 `studio.exe`。
 - **Release Bundle**：自動整合打包為 `LianLianKan-Solver-windows-x64.zip`。
 
 ### 觸發機制
@@ -44,11 +44,11 @@
 
 ## 本地開發指引
 
-### 1. Studio (Python)
+### 1. Studio (Rust)
 ```bash
 cd studio
-uv sync
-uv run python main.py
+cargo build --release
+./target/release/studio.exe     # 不帶參數會出現選單；詳見 studio/README.md
 ```
 
 ### 2. Engine (Rust)
