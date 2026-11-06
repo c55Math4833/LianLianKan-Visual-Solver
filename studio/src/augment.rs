@@ -293,21 +293,28 @@ fn roi_fits(screen: &Image, r: Roi) -> bool {
     r.x >= 0 && r.y >= 0 && r.w > 8 && r.h > 8 && r.x + r.w <= screen.w as i64 && r.y + r.h <= screen.h as i64
 }
 
-/// How well a candidate frame explains the screen: sum of (similarity - 0.5) of every tile cell
+/// How well a candidate frame explains the screen: sum of (similarity - 0.5) of tile cells
 /// against the known templates. A misaligned frame cuts tiles in half and scores low.
-fn frame_score(screen: &Image, roi: Roi, rows: usize, cols: usize, library: &[LibEntry]) -> f64 {
+/// With `sample`, only about `SAMPLE_CELLS` evenly spread cells are scored (same cells for every
+/// candidate, so scores stay comparable) - enough to rank candidates, ~4x cheaper.
+const SAMPLE_CELLS: usize = 30;
+
+fn frame_score(screen: &Image, roi: Roi, rows: usize, cols: usize, library: &[LibEntry], sample: bool) -> f64 {
     if !roi_fits(screen, roi) {
         return f64::NEG_INFINITY;
     }
-    let cells = classify_cells(slice_cells(screen, roi, rows, cols));
-    cells
+    let stride = if sample { (rows * cols / SAMPLE_CELLS).max(1) } else { 1 };
+    slice_cells(screen, roi, rows, cols)
         .iter()
-        .filter(|c| c.ty == CellType::Matchable)
-        .map(|c| (best_match(&c.cell.image, library).1 - 0.5).max(0.0))
+        .enumerate()
+        .filter(|(i, _)| i % stride == 0)
+        // flat cells (blank ground / obstacle) carry no tile information
+        .filter(|(_, c)| crate::features::cell_metrics(&c.image).1 >= 10.0)
+        .map(|(_, c)| (best_match(&c.image, library).1 - 0.5).max(0.0))
         .sum()
 }
 
-fn best_of(screen: &Image, cands: &[Roi], rows: usize, cols: usize, library: &[LibEntry]) -> (Roi, f64) {
+fn best_of(screen: &Image, cands: &[Roi], rows: usize, cols: usize, library: &[LibEntry], sample: bool) -> Roi {
     let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(cands.len().max(1));
     let chunk = cands.len().div_ceil(n.max(1)).max(1);
     let mut best = (cands[0], f64::NEG_INFINITY);
@@ -318,7 +325,7 @@ fn best_of(screen: &Image, cands: &[Roi], rows: usize, cols: usize, library: &[L
                 sc.spawn(move || {
                     let mut b = (ch[0], f64::NEG_INFINITY);
                     for &r in ch {
-                        let s = frame_score(screen, r, rows, cols, library);
+                        let s = frame_score(screen, r, rows, cols, library, sample);
                         if s > b.1 {
                             b = (r, s);
                         }
@@ -334,16 +341,18 @@ fn best_of(screen: &Image, cands: &[Roi], rows: usize, cols: usize, library: &[L
             }
         }
     });
-    best
+    if best.1.is_finite() { best.0 } else { cands[0] }
 }
 
 /// Polish a fitted frame by what actually matters: how many tiles match the known templates.
-/// Searches small position / size changes around `start` (coarse to fine).
-pub fn refine_frame(screen: &Image, start: Roi, rows: usize, cols: usize, library: &[LibEntry]) -> Roi {
+/// Coarse to fine over position and size, scored on a sample of cells; only the last +-1 px
+/// step uses every cell. When the grid-line fit was already `confident`, the search window is
+/// about half as wide and the size search is skipped to a single step.
+pub fn refine_frame(screen: &Image, start: Roi, rows: usize, cols: usize, library: &[LibEntry], confident: bool) -> Roi {
     let pitch = (start.w as f64 / cols as f64).min(start.h as f64 / rows as f64);
-    let r = (pitch * 0.12).round().max(2.0) as i64;
-    let st = ((pitch * 0.04).round() as i64).max(1);
-    let mut cur = start;
+    let (rf, sf) = if confident { (0.05, 0.025) } else { (0.12, 0.04) };
+    let r = (pitch * rf).round().max(2.0) as i64;
+    let st = ((pitch * sf).round() as i64).max(1);
 
     // 1) position
     let mut c = Vec::new();
@@ -356,35 +365,27 @@ pub fn refine_frame(screen: &Image, start: Roi, rows: usize, cols: usize, librar
         }
         dy += st;
     }
-    cur = best_of(screen, &c, rows, cols, library).0.max_or(cur);
+    let mut cur = best_of(screen, &c, rows, cols, library, true);
 
     // 2) size (cell pitch), keeping the frame centre
+    let span = if confident { 1 } else { 2 };
     let mut c = Vec::new();
-    for dw in -2..=2i64 {
-        for dh in -2..=2i64 {
+    for dw in -span..=span {
+        for dh in -span..=span {
             let (w, h) = (cur.w + dw * st * 2, cur.h + dh * st * 2);
             c.push(Roi { x: cur.x - (w - cur.w) / 2, y: cur.y - (h - cur.h) / 2, w, h });
         }
     }
-    cur = best_of(screen, &c, rows, cols, library).0.max_or(cur);
+    cur = best_of(screen, &c, rows, cols, library, true);
 
-    // 3) final +-1 px
+    // 3) final +-1 px, all cells
     let mut c = Vec::new();
     for dy in -1..=1i64 {
         for dx in -1..=1i64 {
             c.push(Roi { x: cur.x + dx, y: cur.y + dy, ..cur });
         }
     }
-    best_of(screen, &c, rows, cols, library).0.max_or(cur)
-}
-
-trait MaxOr {
-    fn max_or(self, fallback: Roi) -> Roi;
-}
-impl MaxOr for Roi {
-    fn max_or(self, fallback: Roi) -> Roi {
-        if self.w > 0 { self } else { fallback }
-    }
+    best_of(screen, &c, rows, cols, library, false)
 }
 
 pub struct Resample {
@@ -457,7 +458,7 @@ mod tests {
         let cell = exp.w as f64 / cols as f64;
         let rough = Roi { x: exp.x - (0.4 * cell) as i64, y: exp.y + (0.3 * cell) as i64, w: exp.w + (0.8 * cell) as i64, h: exp.h + (0.7 * cell) as i64 };
         let fit = crate::calibrate::fit_known_grid(&screen, rough, rows, cols);
-        let fin = refine_frame(&screen, fit.roi, rows, cols, &lib);
+        let fin = refine_frame(&screen, fit.roi, rows, cols, &lib, fit.confidence >= 0.6);
         println!("expected {:?}\nfit      {:?}\nrefined  {:?}", exp, fit.roi, fin);
         let board = screen.crop(fin.x as usize, fin.y as usize, fin.w as usize, fin.h as usize);
         let rs = resample_templates(&board, rows, cols, &lib, &base.join("templates")).unwrap();

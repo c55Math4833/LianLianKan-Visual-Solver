@@ -451,7 +451,7 @@ fn run_reroi(args: &Args) -> Result<()> {
     // second step: choose, among small shifts / size changes, the frame under which the tiles match the known objects best
     let mut froi = fit.roi;
     if let Some(lib) = &library {
-        froi = augment::refine_frame(&screen, fit.roi, rows, cols, lib);
+        froi = augment::refine_frame(&screen, fit.roi, rows, cols, lib, fit.confidence >= 0.6);
         println!("[比對微調] 以磚塊比對結果微調: X={}, Y={}, W={}, H={}", froi.x, froi.y, froi.w, froi.h);
     }
     let nroi = Roi { x: mon.x as i64 + froi.x, y: mon.y as i64 + froi.y, w: froi.w, h: froi.h };
