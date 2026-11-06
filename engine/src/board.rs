@@ -5,6 +5,10 @@ use std::fmt;
 
 pub const EMPTY: i32 = 0;
 pub const OBSTACLE: i32 = -1;
+/// A cell that is NOT flat background but could not be matched to any template with
+/// enough confidence (hover highlight, animation frame, unseen tile ...).
+/// It blocks paths exactly like an obstacle and is never offered as a tile.
+pub const UNKNOWN: i32 = -2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Point {
@@ -148,6 +152,30 @@ impl Board {
         self.cells.iter().filter(|&&v| v > 0).count()
     }
 
+    /// Copy of the board in which every OBSTACLE cell is treated as EMPTY.
+    pub fn without_obstacles(&self) -> Board {
+        let mut b = self.clone();
+        for v in b.cells.iter_mut() {
+            if *v == OBSTACLE {
+                *v = EMPTY;
+            }
+        }
+        b
+    }
+
+    /// Cells that could not be recognised (see `UNKNOWN`).
+    pub fn unknown_points(&self) -> Vec<Point> {
+        let mut v = Vec::new();
+        for r in 0..self.rows {
+            for c in 0..self.cols {
+                if self.cells[r * self.cols + c] == UNKNOWN {
+                    v.push(Point::new(r as i32, c as i32));
+                }
+            }
+        }
+        v
+    }
+
     pub fn is_cleared(&self) -> bool {
         self.remaining_tiles_count() == 0
     }
@@ -178,9 +206,15 @@ impl Board {
     /// Creates a PaddedBoard with 1 ring of EMPTY cells around the entire board.
     /// Original (r, c) becomes Padded (r + 1, c + 1).
     pub fn to_padded(&self) -> PaddedBoard {
+        self.to_padded_with_border(EMPTY)
+    }
+
+    /// Padded copy whose outer ring is filled with `border` (EMPTY = free to route
+    /// around the board, OBSTACLE = paths must stay inside the board).
+    pub fn to_padded_with_border(&self, border: i32) -> PaddedBoard {
         let p_rows = self.rows + 2;
         let p_cols = self.cols + 2;
-        let mut p_cells = vec![EMPTY; p_rows * p_cols];
+        let mut p_cells = vec![border; p_rows * p_cols];
 
         for r in 0..self.rows {
             for c in 0..self.cols {

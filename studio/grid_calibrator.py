@@ -8,7 +8,25 @@ Guarantees pixel-perfect tile centering and full outer tile inclusion without cl
 import os
 import cv2
 import numpy as np
-from scipy.signal import find_peaks
+
+def find_peaks_1d(arr, distance=10):
+    """
+    Pure NumPy 1D peak detection with minimum peak distance.
+    Drop-in replacement for scipy.signal.find_peaks.
+    """
+    if len(arr) < 3:
+        return np.array([], dtype=int)
+    dx = np.diff(arr)
+    peaks = np.where((dx[:-1] > 0) & (dx[1:] <= 0))[0] + 1
+    if len(peaks) <= 1 or distance <= 1:
+        return peaks
+    order = np.argsort(arr[peaks])[::-1]
+    keep = []
+    for idx in order:
+        p = peaks[idx]
+        if all(abs(p - k) >= distance for k in keep):
+            keep.append(p)
+    return np.sort(np.array(keep, dtype=int))
 
 def load_image(path):
     """Load image from path supporting unicode filenames on Windows."""
@@ -26,91 +44,181 @@ def save_image(path, img):
         with open(path, 'wb') as f:
             f.write(enc)
 
-def get_dominant_pitch(profile, max_len):
+def _unbiased_autocorr(profile):
+    """Mean-removed, overlap-normalised autocorrelation (value at lag 0 == 1)."""
+    p = np.asarray(profile, dtype=np.float64)
+    p = p - p.mean()
+    n = len(p)
+    c = np.correlate(p, p, mode='full')[n - 1:]
+    c = c / (n - np.arange(n))
+    return c / c[0] if c[0] > 1e-9 else c
+
+def estimate_pitch(profile, min_lag=15, max_lag=160, fallback=45.0):
     """
-    Computes dominant grid pitch using 1D signal autocorrelation.
+    Sub-pixel grid pitch from a 1-D gradient profile.
+    1. Autocorrelation peaks -> fundamental = smallest lag that is a strong peak
+       (so 2x / 3x multiples are never chosen).
+    2. Refine with the higher harmonics (k * pitch) by a least-squares fit, which
+       removes the integer-lag quantisation error that accumulates over many tiles.
     """
-    norm = profile - np.mean(profile)
-    corr = np.correlate(norm, norm, mode='full')[len(profile)-1:]
-    min_lag, max_lag = 18, min(120, max_len // 2)
-    if max_lag <= min_lag:
-        return 45.0
-    peaks, _ = find_peaks(corr[min_lag:max_lag], distance=10)
-    peaks = peaks + min_lag
-    if len(peaks) == 0:
-        return 45.0
-    return float(peaks[np.argmax(corr[peaks])])
+    n = len(profile)
+    max_lag = min(max_lag, n // 2)
+    if max_lag <= min_lag + 2:
+        return float(fallback)
+    c = _unbiased_autocorr(profile)
+    cand = [i for i in range(min_lag, max_lag)
+            if c[i] > c[i - 1] and c[i] >= c[i + 1] and c[i] > 0.1]
+    if not cand:
+        return float(fallback)
+    # Score every candidate by how well its whole harmonic comb (L, 2L, 3L ...)
+    # lands on autocorrelation peaks: side lobes (e.g. icon edges) have no
+    # harmonics, whereas the true pitch does.  Prefer the smallest strong one so
+    # that 2x / 3x multiples are never chosen.
+    def comb_score(L):
+        vals = []
+        for k in range(1, 7):
+            pos = int(round(k * L))
+            if pos + 1 >= n or k * L > n * 0.6:
+                break
+            vals.append(c[max(pos - 1, 0):pos + 2].max())
+        return float(np.mean(vals)) if vals else 0.0
+    scores = {i: comb_score(i) for i in cand}
+    top = max(scores.values())
+    p0 = float(next(i for i in cand if scores[i] >= 0.65 * top))
+    # Harmonic refinement: each k-th peak is searched near k * (current estimate),
+    # so the search window stays narrow and never jumps onto a neighbouring peak.
+    pk = p0
+    ks, ls = [], []
+    for k in range(1, 13):
+        if k * pk >= n * 0.6:
+            break
+        half = 1.5 + 0.3 * k
+        lo = max(1, int(round(k * pk - half)))
+        hi = min(n - 2, int(round(k * pk + half)))
+        if hi <= lo:
+            break
+        j = lo + int(np.argmax(c[lo:hi + 1]))
+        if j in (lo, hi) or c[j] <= 0.15:
+            continue                      # not a clean local maximum
+        d = c[j - 1] - 2 * c[j] + c[j + 1]
+        off = 0.5 * (c[j - 1] - c[j + 1]) / d if d < 0 else 0.0
+        ks.append(k)
+        ls.append(j + off)
+        a_, b_ = np.array(ks, float), np.array(ls, float)
+        pk = float(np.sum(a_ * b_) / np.sum(a_ * a_))
+    return pk if ks else p0
+
+def get_dominant_pitch(profile, max_len=None):
+    """Backward compatible wrapper."""
+    return estimate_pitch(profile)
+
+def _fold(profile, pitch, nb):
+    n = len(profile)
+    idx = ((np.arange(n) % pitch) / pitch * nb).astype(int) % nb
+    return np.bincount(idx, weights=profile, minlength=nb) / np.maximum(
+        np.bincount(idx, minlength=nb), 1)
+
+def _lattice_phase(profile, pitch):
+    """
+    Position (px, 0 <= x < pitch) of the tile *boundary* lattice.
+    The profile is folded modulo the sub-pixel pitch.  A row/column of tiles is
+    mirror-symmetric about both the tile centre and the tile boundary, so the
+    reflection-symmetry axes of the folded profile give the two candidates; the
+    one closest to the dominant edge-energy peak (tile outlines pile up at the
+    boundary) is the boundary.  This is far less biased by one-sided tile shadows / 3-D
+    side faces than taking the energy peak directly.
+    """
+    p = np.asarray(profile, dtype=np.float64)
+    nb = max(8, int(round(pitch * 2)))
+    nb += nb % 2
+    F = _fold(p, pitch, nb)
+    Fc = F - F.mean()
+    h = nb // 2
+    t = np.arange(1, h)
+    sym = np.array([np.sum(Fc[(k + t) % nb] * Fc[(k - t) % nb]) for k in range(nb)])
+    k = int(np.argmax(sym[:h] + sym[h:]))
+    # smoothed energy to tell boundary from tile centre
+    win = max(3, int(round(0.14 * nb)))
+    ext = np.concatenate([F[-win:], F, F[:win]])
+    sm = np.convolve(ext, np.ones(win) / win, mode='same')[win:-win]
+    peak = int(np.argmax(sm))
+    best = min((k, k + h), key=lambda c: min((c - peak) % nb, (peak - c) % nb))
+    return (best % nb) / nb * pitch
+
+def _axis_lattice(profile, size, pitch):
+    """
+    Returns (first_boundary, n_cells) of the lattice along one axis.
+    Cells that stick out of the image by more than 15 % of a pitch are dropped.
+    """
+    first = _lattice_phase(profile, pitch) % pitch
+    if first - pitch > -0.15 * pitch:      # leading cell is >= 85 % visible
+        first -= pitch
+    n = int(np.floor((size - first) / pitch + 0.15))
+    return first, max(1, n)
 
 def align_grid_lattice(img, approx_roi=None):
     """
-    Comb-Filter Lattice Alignment:
-    Uses mathematical periodic comb filtering across Sobel gradient projections
-    to find the global optimal grid origin (X0, Y0) and dimensions (W, H).
-    Completely eliminates human dragging inaccuracies and phase offsets.
+    Pitch + phase based lattice alignment.
+    With approx_roi (user selection, may include < 1 tile of margin) the lattice is
+    estimated inside the selection only, using sub-pixel pitch and Fourier phase,
+    then outer rows/cols that are not tile-like (margin/background) are trimmed.
     """
     h_img, w_img = img.shape[:2]
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
+    if approx_roi is None:
+        approx_roi = {"x": 0, "y": 0, "w": w_img, "h": h_img}
+    rx = max(0, int(approx_roi['x']))
+    ry = max(0, int(approx_roi['y']))
+    rw = min(int(approx_roi['w']), w_img - rx)
+    rh = min(int(approx_roi['h']), h_img - ry)
+
+    sub = img[ry:ry + rh, rx:rx + rw]
+    gray = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY).astype(np.float64)
     gx = np.abs(cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3))
     gy = np.abs(cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3))
-    
-    px = np.mean(gx, axis=0)
-    py = np.mean(gy, axis=1)
-    
-    pitch_x = get_dominant_pitch(px, w_img)
-    pitch_y = get_dominant_pitch(py, h_img)
-    
-    if approx_roi is not None:
-        rx = max(0, int(approx_roi['x']))
-        ry = max(0, int(approx_roi['y']))
-        rw = min(int(approx_roi['w']), w_img - rx)
-        rh = min(int(approx_roi['h']), h_img - ry)
-    else:
-        rx, ry, rw, rh = 0, 0, w_img, h_img
-        
-    cols = max(1, int(round(rw / pitch_x)))
-    rows = max(1, int(round(rh / pitch_y)))
-    
-    # Sweep phase X0 in range around rx (+/- 0.6 * pitch_x)
-    search_rx_min = max(0, int(round(rx - pitch_x * 0.6)))
-    search_rx_max = min(w_img - int(round(cols * pitch_x)), int(round(rx + pitch_x * 0.6)))
-    
-    best_x0 = rx
-    best_score_x = -1.0
-    if search_rx_max >= search_rx_min:
-        for x0 in range(search_rx_min, search_rx_max + 1):
-            score = sum(
-                px[int(round(x0 + c * pitch_x))]
-                for c in range(cols + 1)
-                if int(round(x0 + c * pitch_x)) < len(px)
-            )
-            if score > best_score_x:
-                best_score_x = score
-                best_x0 = x0
+    px = gx.mean(axis=0)
+    py = gy.mean(axis=1)
 
-    # Sweep phase Y0 in range around ry (+/- 0.6 * pitch_y)
-    search_ry_min = max(0, int(round(ry - pitch_y * 0.6)))
-    search_ry_max = min(h_img - int(round(rows * pitch_y)), int(round(ry + pitch_y * 0.6)))
-    
-    best_y0 = ry
-    best_score_y = -1.0
-    if search_ry_max >= search_ry_min:
-        for y0 in range(search_ry_min, search_ry_max + 1):
-            score = sum(
-                py[int(round(y0 + r * pitch_y))]
-                for r in range(rows + 1)
-                if int(round(y0 + r * pitch_y)) < len(py)
-            )
-            if score > best_score_y:
-                best_score_y = score
-                best_y0 = y0
+    pitch_x = estimate_pitch(px)
+    pitch_y = estimate_pitch(py)
 
-    final_w = int(round(cols * pitch_x))
-    final_h = int(round(rows * pitch_y))
-    
+    fx, ncx = _axis_lattice(px, rw, pitch_x)
+    fy, ncy = _axis_lattice(py, rh, pitch_y)
+
+    # Trim margin rows/cols: a real outer row/col is closed by tile outlines on BOTH
+    # of its lattice boundaries, a margin cell has (almost) no edge energy there.
+    def boundary_ok(profile, first, pitch, ncell, size):
+        win = max(3, int(round(pitch * 0.2)))
+        e = []
+        for k in range(ncell + 1):
+            pos = first + k * pitch
+            lo, hi = int(round(pos - win)), int(round(pos + win)) + 1
+            e.append(float(profile[max(lo, 0):min(hi, size)].max())
+                     if hi > 0 and lo < size and hi > lo else None)
+        vals = [v for v in e if v is not None]
+        ref_ = float(np.median(vals)) if vals else 1.0
+        e = [ref_ if v is None else v for v in e]    # out-of-image boundary: neutral
+        return [(e[k] >= 0.25 * ref_ and e[k + 1] >= 0.25 * ref_) for k in range(ncell)]
+
+    col_ok = np.array(boundary_ok(px, fx, pitch_x, ncx, rw))
+    row_ok = np.array(boundary_ok(py, fy, pitch_y, ncy, rh))
+    if not col_ok.any():
+        col_ok[:] = True
+    if not row_ok.any():
+        row_ok[:] = True
+    c0 = int(np.argmax(col_ok)); c1 = ncx - int(np.argmax(col_ok[::-1]))
+    r0 = int(np.argmax(row_ok)); r1 = ncy - int(np.argmax(row_ok[::-1]))
+    rows, cols = r1 - r0, c1 - c0
+
+    x0 = fx + c0 * pitch_x
+    y0 = fy + r0 * pitch_y
+    final_x = int(round(max(0, x0)))
+    final_y = int(round(max(0, y0)))
+    final_w = min(int(round(cols * pitch_x)), rw - final_x)
+    final_h = min(int(round(rows * pitch_y)), rh - final_y)
+
     return {
-        "x": int(best_x0),
-        "y": int(best_y0),
+        "x": rx + final_x,
+        "y": ry + final_y,
         "w": int(final_w),
         "h": int(final_h),
         "rows": rows,
@@ -122,14 +230,15 @@ def align_grid_lattice(img, approx_roi=None):
 def detect_board_roi(img):
     """
     Robustly auto-detect the game board outer bounding box.
-    Uses 2D Tile Contour Clustering + Comb-Filter Lattice Alignment
-    to ensure full tile inclusion without clipping board edges.
+    Uses Multi-Scale 2D Contour Extraction + Spatial Density Filtering
+    + Connected Lattice Component Analysis + Localized Comb-Filter Lattice Alignment.
+    Guarantees zero interference from desktop icons, window taskbars, or UI noise.
     """
     h, w = img.shape[:2]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # 2D Tile Contour Extraction
-    edges = cv2.Canny(gray, 30, 110)
+    # Multi-scale edge detection
+    edges = cv2.Canny(gray, 25, 100)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     dilated = cv2.dilate(edges, kernel, iterations=1)
     
@@ -137,12 +246,13 @@ def detect_board_roi(img):
     tile_boxes = []
     for c in contours:
         bx, by, bw, bh = cv2.boundingRect(c)
-        if 18 <= bw <= 95 and 18 <= bh <= 95 and 0.6 <= bw / float(bh) <= 1.6:
+        if 18 <= bw <= 110 and 18 <= bh <= 110 and 0.55 <= bw / float(bh) <= 1.8:
             tile_boxes.append((bx, by, bw, bh))
             
     if len(tile_boxes) >= 6:
         med_w = np.median([b[2] for b in tile_boxes])
         med_h = np.median([b[3] for b in tile_boxes])
+        pitch = (med_w + med_h) / 2.0
         
         valid = [
             b for b in tile_boxes
@@ -150,26 +260,69 @@ def detect_board_roi(img):
         ]
         
         if len(valid) >= 6:
-            min_x = min(b[0] for b in valid)
-            min_y = min(b[1] for b in valid)
-            max_x = max(b[0] + b[2] for b in valid)
-            max_y = max(b[1] + b[3] for b in valid)
+            centers = np.array([(b[0] + b[2]/2.0, b[1] + b[3]/2.0) for b in valid])
+            n = len(valid)
             
-            raw_roi = {
-                "x": min_x,
-                "y": min_y,
-                "w": max_x - min_x,
-                "h": max_y - min_y
-            }
-            # Refine with comb filter lattice alignment
-            aligned = align_grid_lattice(img, approx_roi=raw_roi)
-            return {
-                "x": aligned["x"],
-                "y": aligned["y"],
-                "w": aligned["w"],
-                "h": aligned["h"]
-            }
+            # Spatial density filter: board tiles are clustered with multiple neighbors
+            R = 3.5 * pitch
+            dense_indices = [
+                i for i in range(n)
+                if np.sum(np.sqrt(np.sum((centers - centers[i])**2, axis=1)) <= R) - 1 >= 3
+            ]
             
+            if len(dense_indices) >= 6:
+                dense_boxes = [valid[idx] for idx in dense_indices]
+                dense_centers = centers[dense_indices]
+                
+                # Connect adjacent tile clusters (connect threshold up to 4.5 * pitch to span hollow gaps)
+                m = len(dense_boxes)
+                adj = [[] for _ in range(m)]
+                for i in range(m):
+                    for j in range(i + 1, m):
+                        if np.linalg.norm(dense_centers[i] - dense_centers[j]) <= 4.5 * pitch:
+                            adj[i].append(j)
+                            adj[j].append(i)
+                            
+                visited = [False] * m
+                components = []
+                for i in range(m):
+                    if not visited[i]:
+                        comp = []
+                        q = [i]
+                        visited[i] = True
+                        while q:
+                            curr = q.pop()
+                            comp.append(curr)
+                            for nbr in adj[curr]:
+                                if not visited[nbr]:
+                                    visited[nbr] = True
+                                    q.append(nbr)
+                        components.append(comp)
+                        
+                components.sort(key=len, reverse=True)
+                largest = components[0]
+                board_boxes = [dense_boxes[idx] for idx in largest]
+                
+                min_x = min(b[0] for b in board_boxes)
+                min_y = min(b[1] for b in board_boxes)
+                max_x = max(b[0] + b[2] for b in board_boxes)
+                max_y = max(b[1] + b[3] for b in board_boxes)
+                
+                raw_roi = {
+                    "x": min_x,
+                    "y": min_y,
+                    "w": max_x - min_x,
+                    "h": max_y - min_y
+                }
+                
+                aligned = align_grid_lattice(img, approx_roi=raw_roi)
+                return {
+                    "x": aligned["x"],
+                    "y": aligned["y"],
+                    "w": aligned["w"],
+                    "h": aligned["h"]
+                }
+                
     # Fallback to direct lattice alignment
     aligned = align_grid_lattice(img, approx_roi=None)
     return {
@@ -270,18 +423,21 @@ def draw_grid_overlay(img, roi, rows, cols, output_path=None):
     overlay = img.copy()
     x, y, w, h = roi["x"], roi["y"], roi["w"], roi["h"]
     
-    cv2.rectangle(overlay, (x, y), (x + w, y + h), (0, 0, 255), 2)
+    # Draw outer ROI box
+    cv2.rectangle(overlay, (x, y), (x + w, y + h), (0, 255, 0), 2)
     
     cell_w = w / float(cols)
     cell_h = h / float(rows)
     
-    for c in range(cols + 1):
-        cx = int(round(x + c * cell_w))
-        cv2.line(overlay, (cx, y), (cx, y + h), (0, 255, 0), 1)
+    # Vertical grid lines
+    for c in range(1, cols):
+        lx = int(round(x + c * cell_w))
+        cv2.line(overlay, (lx, y), (lx, y + h), (0, 220, 255), 1)
         
-    for r in range(rows + 1):
-        ry = int(round(y + r * cell_h))
-        cv2.line(overlay, (x, ry), (x + w, ry), (0, 255, 0), 1)
+    # Horizontal grid lines
+    for r in range(1, rows):
+        ly = int(round(y + r * cell_h))
+        cv2.line(overlay, (x, ly), (x + w, ly), (0, 220, 255), 1)
         
     if output_path:
         save_image(output_path, overlay)

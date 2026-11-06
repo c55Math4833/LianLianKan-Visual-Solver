@@ -1,4 +1,4 @@
-use crate::board::{Board, PaddedBoard, Point};
+use crate::board::{Board, PaddedBoard, Point, OBSTACLE};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +27,8 @@ pub struct SolverConfig {
     pub one_turn_bonus: i64,
     pub two_turn_bonus: i64,
     pub outer_margin_bonus: i64,
+    /// false => the padded outer ring is treated as blocked (paths stay inside the board).
+    pub allow_outer_path: bool,
 }
 
 impl Default for SolverConfig {
@@ -39,6 +41,7 @@ impl Default for SolverConfig {
             one_turn_bonus: 150,
             two_turn_bonus: 50,
             outer_margin_bonus: 400,
+            allow_outer_path: true,
         }
     }
 }
@@ -72,7 +75,11 @@ impl Solver {
             return None;
         }
 
-        let padded = board.to_padded();
+        let padded = if self.config.allow_outer_path {
+            board.to_padded()
+        } else {
+            board.to_padded_with_border(OBSTACLE)
+        };
         let pp1 = PaddedBoard::to_padded_point(p1);
         let pp2 = PaddedBoard::to_padded_point(p2);
 
@@ -539,5 +546,41 @@ mod tests {
 
         assert!(board.is_cleared());
         assert_eq!(steps, 4);
+    }
+
+    #[test]
+    fn test_outer_path_toggle() {
+        // Two tiles in the same edge column, separated by a tile, can only meet by routing outside.
+        let mut board = Board::new(3, 3);
+        let vals = [1, 2, 3, 4, 5, 6, 1, 8, 9];
+        for (i, v) in vals.iter().enumerate() {
+            board.set((i / 3) as i32, (i % 3) as i32, *v);
+        }
+        let (a, b) = (Point::new(0, 0), Point::new(2, 0));
+
+        let allowed = Solver::new();
+        assert!(allowed.can_connect(&board, a, b).is_some());
+
+        let blocked = Solver::with_config(SolverConfig {
+            allow_outer_path: false,
+            ..SolverConfig::default()
+        });
+        assert!(blocked.can_connect(&board, a, b).is_none());
+    }
+
+    #[test]
+    fn test_relaxed_board_ignores_obstacles() {
+        // [1, #, 1] with the outer ring blocked: impossible, unless the obstacle is ignored.
+        let mut board = Board::new(1, 3);
+        board.set(0, 0, 1);
+        board.set(0, 1, OBSTACLE);
+        board.set(0, 2, 1);
+        let solver = Solver::with_config(SolverConfig {
+            allow_outer_path: false,
+            ..SolverConfig::default()
+        });
+        let (a, b) = (Point::new(0, 0), Point::new(0, 2));
+        assert!(solver.can_connect(&board, a, b).is_none());
+        assert!(solver.can_connect(&board.without_obstacles(), a, b).is_some());
     }
 }

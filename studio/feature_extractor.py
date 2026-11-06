@@ -7,66 +7,49 @@ Distinguishes empty background cells and obstacle stone blocks.
 import cv2
 import numpy as np
 
+def _cell_metrics(cell_img):
+    """Colour-independent descriptors of one cell (all relative to cell size)."""
+    h, w = cell_img.shape[:2]
+    gray = cv2.cvtColor(cell_img, cv2.COLOR_BGR2GRAY).astype(np.float64)
+    gm = (np.abs(cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)) +
+          np.abs(cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)))
+    y0, y1 = int(h * 0.25), max(int(h * 0.75), int(h * 0.25) + 2)
+    x0, x1 = int(w * 0.25), max(int(w * 0.75), int(w * 0.25) + 2)
+    core = cell_img[y0:y1, x0:x1]
+    core_mean = np.mean(core.reshape(-1, 3), axis=0)
+    core_std = float(np.mean(np.std(core.reshape(-1, 3), axis=0)))
+    ring_mask = np.ones((h, w), bool)
+    ring_mask[int(h * 0.3):int(h * 0.7), int(w * 0.3):int(w * 0.7)] = False
+    return core_mean, core_std, float(gm[ring_mask].mean())
+
 def extract_features(cell_img):
     """
     Extract comprehensive visual features from a sliced cell image.
-    Returns a dictionary of features and initial type classification.
+    Returns a dictionary of features and a *provisional* type classification;
+    call classify_cells() on the whole board for the final empty/obstacle split.
     """
     h, w, _ = cell_img.shape
     cy, cx = h // 2, w // 2
-    
-    # Core central patch (20x20)
-    core = cell_img[cy-10:cy+10, cx-10:cx+10]
-    core_mean_bgr = np.mean(core, axis=(0, 1))
-    core_std_bgr = np.mean(np.std(core, axis=(0, 1)))
-    
-    # Grayscale conversion
-    gray = cv2.cvtColor(cell_img, cv2.COLOR_BGR2GRAY)
-    core_gray = gray[cy-10:cy+10, cx-10:cx+10]
-    core_std_gray = float(np.std(core_gray))
-    
-    # 1. Check for Empty background cell:
-    # Cleared board has a flat, solid tan/khaki color with near-zero texture/variance
-    is_empty = (
-        128 <= core_mean_bgr[0] <= 155 and
-        158 <= core_mean_bgr[1] <= 178 and
-        178 <= core_mean_bgr[2] <= 198 and
-        core_std_bgr < 2.5
-    )
-    
-    if is_empty:
+    core_mean_bgr, core_std_bgr, ring_grad = _cell_metrics(cell_img)
+
+    # Flat centre (no icon) => empty ground or obstacle; decided board-wide later.
+    if core_std_bgr < 10.0:
         return {
-            "type": "empty",
-            "id": 0,
+            "type": "flat",
             "core_mean_bgr": core_mean_bgr.tolist(),
-            "core_std_bgr": float(core_std_bgr)
+            "core_std_bgr": float(core_std_bgr),
+            "ring_grad": ring_grad
         }
-        
-    # 2. Check for Obstacle stone block:
-    # Obstacles are the solid grey stone blocks (bluish grey tint, low texture)
-    is_obstacle = (
-        152 <= core_mean_bgr[0] <= 175 and
-        138 <= core_mean_bgr[1] <= 158 and
-        115 <= core_mean_bgr[2] <= 135 and
-        core_std_bgr < 3.0
-    )
-    
-    if is_obstacle:
-        return {
-            "type": "obstacle",
-            "id": -1,
-            "core_mean_bgr": core_mean_bgr.tolist(),
-            "core_std_bgr": float(core_std_bgr)
-        }
-        
+
     # 3. Matchable tile feature extraction
     # Tile body color (outer frame ring, avoiding central icon)
-    margin = 4
+    margin = max(2, int(round(min(h, w) * 0.09)))
+    bw = max(2, margin)
     border_pixels = np.concatenate([
-        cell_img[margin:margin+4, margin:w-margin].reshape(-1, 3),
-        cell_img[h-margin-4:h-margin, margin:w-margin].reshape(-1, 3),
-        cell_img[margin:h-margin, margin:margin+4].reshape(-1, 3),
-        cell_img[margin:h-margin, w-margin-4:w-margin].reshape(-1, 3)
+        cell_img[margin:margin+bw, margin:w-margin].reshape(-1, 3),
+        cell_img[h-margin-bw:h-margin, margin:w-margin].reshape(-1, 3),
+        cell_img[margin:h-margin, margin:margin+bw].reshape(-1, 3),
+        cell_img[margin:h-margin, w-margin-bw:w-margin].reshape(-1, 3)
     ])
     body_bgr = np.median(border_pixels, axis=0)
     body_hsv = cv2.cvtColor(np.uint8([[body_bgr]]), cv2.COLOR_BGR2HSV)[0][0]
@@ -91,7 +74,8 @@ def extract_features(cell_img):
     hist_feat = hist.flatten().tolist()
     
     # Icon shape / perceptual features (center 28x28)
-    icon_roi = cell_img[cy-14:cy+14, cx-14:cx+14]
+    ih, iw = max(4, int(h * 0.31)), max(4, int(w * 0.31))
+    icon_roi = cell_img[max(0, cy-ih):cy+ih, max(0, cx-iw):cx+iw]
     icon_gray = cv2.cvtColor(icon_roi, cv2.COLOR_BGR2GRAY)
     
     # Icon contour / mask (color diff from body)
@@ -114,3 +98,42 @@ def extract_features(cell_img):
         "hu_moments": log_hu,
         "hist": hist_feat
     }
+
+
+def classify_cells(cells):
+    """
+    Board-wide, colour-independent split of flat cells into EMPTY ground and
+    OBSTACLE blocks.  Works on any skin (tan, blue swirl, black ...):
+      * flat cell   : centre texture is far below the icon tiles (extract_features)
+      * obstacle    : flat centre but a tile-like outline (ring gradient close to
+                      real tiles), or - when a clear majority of flat cells share one
+                      colour - a flat cell whose colour clearly differs from that
+                      majority and which still shows a moderate outline.
+      * empty       : every other flat cell.
+    Mutates each cell's 'tile_type' / 'features["type"]' and returns the cells.
+    """
+    tiles = [c for c in cells if c["features"].get("type") == "matchable"]
+    flats = [c for c in cells if c["features"].get("type") == "flat"]
+    if not flats:
+        return cells
+    if tiles:
+        ref_ring = float(np.median([_cell_metrics(c["image"])[2] for c in tiles]))
+    else:
+        ref_ring = max(f["features"]["ring_grad"] for f in flats) or 1.0
+    ref_ring = max(ref_ring, 1e-6)
+
+    # majority colour of flat cells (Lab distance, robust median)
+    labs = np.array([cv2.cvtColor(np.uint8([[f["features"]["core_mean_bgr"]]]),
+                                  cv2.COLOR_BGR2LAB)[0][0] for f in flats], float)
+    majority = np.median(labs, axis=0)
+
+    for f in flats:
+        ratio = f["features"]["ring_grad"] / ref_ring
+        lab = cv2.cvtColor(np.uint8([[f["features"]["core_mean_bgr"]]]),
+                           cv2.COLOR_BGR2LAB)[0][0].astype(float)
+        dcol = float(np.linalg.norm(lab - majority))
+        is_obstacle = ratio >= 0.45 or (ratio >= 0.30 and dcol > 25)
+        f["features"]["type"] = "obstacle" if is_obstacle else "empty"
+        f["features"]["id"] = -1 if is_obstacle else 0
+        f["tile_type"] = f["features"]["type"]
+    return cells

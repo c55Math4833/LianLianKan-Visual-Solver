@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use engine::{
-    create_capturer, Controller, GameProfile, Matcher, MatcherConfig, Solver, EMPTY,
+    create_capturer, Controller, GameProfile, Matcher, MatcherConfig, Solver, SolverConfig, EMPTY,
+    Point,
 };
+use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
@@ -99,7 +101,7 @@ fn create_sample_profile_if_missing(path: &Path) -> Result<()> {
                 },
             },
             matcher: engine::profile::MatcherProfile {
-                threshold: 0.82,
+                threshold: 0.75,
                 empty_variance_threshold: 15.0,
                 template_dir: "templates".to_string(),
             },
@@ -108,6 +110,7 @@ fn create_sample_profile_if_missing(path: &Path) -> Result<()> {
                 animation_delay_ms: 100,
                 verify_timeout_ms: 500,
             },
+            rules: Default::default(),
         };
         sample.save_to_file(path)?;
     }
@@ -149,7 +152,14 @@ fn main() -> Result<()> {
         );
     }
 
-    let solver = Solver::new();
+    let solver = Solver::with_config(SolverConfig {
+        allow_outer_path: profile.rules.allow_outer_path,
+        ..Default::default()
+    });
+    println!(
+        "[Rules] Outer-ring paths: {}",
+        if profile.rules.allow_outer_path { "ALLOWED" } else { "BLOCKED (inside board only)" }
+    );
     let controller = Controller::new(profile.timing.click_interval_ms);
     let mut capturer = create_capturer();
 
@@ -169,7 +179,11 @@ fn main() -> Result<()> {
     let mut paused = false;
     let mut total_moves = 0;
     let start_time = Instant::now();
-    let mut consecutive_failures = 0;
+    // Pairs that were proposed but could not be executed. Cleared whenever the board changes,
+    // so the engine never keeps repeating the same impossible step.
+    let mut failed_pairs: HashSet<(Point, Point)> = HashSet::new();
+    let mut last_signature: Vec<i32> = Vec::new();
+    let mut last_unknown_report: Vec<Point> = Vec::new();
 
     'game_loop: loop {
         // Check hotkeys
@@ -182,7 +196,7 @@ fn main() -> Result<()> {
             paused = !paused;
             println!(
                 "\n[Engine] F8 pressed: Engine is now {}",
-                if paused { "PAUSED" } else { "RESUMED" }
+                if paused { "PAUSED (press F8 again to resume)" } else { "RESUMED" }
             );
             sleep(Duration::from_millis(300)); // Debounce
         }
@@ -228,15 +242,88 @@ fn main() -> Result<()> {
             }
         };
 
+        // Board changed since last scan -> old failures no longer apply.
+        if board.cells != last_signature {
+            failed_pairs.clear();
+            last_signature = board.cells.clone();
+        }
+
+        // Cells that are neither blank nor a known tile: treated as blockers, never as empty.
+        let unknown = board.unknown_points();
+        if unknown != last_unknown_report {
+            if !unknown.is_empty() {
+                println!(
+                    "[Matcher] {} unrecognised cell(s) treated as blocked: {:?} (lower matcher.threshold or re-run studio if this persists)",
+                    unknown.len(),
+                    unknown.iter().map(|p| (p.row, p.col)).collect::<Vec<_>>()
+                );
+            }
+            last_unknown_report = unknown.clone();
+        }
+
         let remaining = board.remaining_tiles_count();
+        if remaining == 0 && !unknown.is_empty() {
+            // Something is still on the board that we cannot read: re-scan instead of finishing.
+            sleep(Duration::from_millis(200));
+            continue;
+        }
         if remaining == 0 {
             println!("\n🎉 [VICTORY] All tiles cleared in {:?}", start_time.elapsed());
             println!("Total moves executed: {}", total_moves);
             break 'game_loop;
         }
 
-        // Find next best match
-        let best_match = solver.find_best_match(&board);
+        // Find next best match that has not already failed on this exact board state
+        let best_match = solver
+            .find_all_matches(&board)
+            .into_iter()
+            .find(|c| !failed_pairs.contains(&(c.p1, c.p2)));
+
+        // No solution on the real board: optionally try again pretending obstacle blocks are
+        // not there (the game may still refuse; a failed pair is remembered and skipped).
+        let mut best_match = best_match;
+        if best_match.is_none() && profile.rules.ignore_obstacles_when_stuck {
+            let relaxed = board.without_obstacles();
+            if relaxed.cells != board.cells {
+                best_match = solver
+                    .find_all_matches(&relaxed)
+                    .into_iter()
+                    .find(|c| !failed_pairs.contains(&(c.p1, c.p2)));
+                if let Some(m) = &best_match {
+                    println!(
+                        "[Fallback] No normal move. Trying to ignore obstacles: {} <-> {} (Tile #{})",
+                        m.p1, m.p2, m.tile_id
+                    );
+                }
+            }
+        }
+
+        // Re-check both target cells on a FRESH capture right before clicking
+        // (board may have changed / animation / highlight since the scan).
+        if let (Some(m), false) = (&best_match, args.dry_run) {
+            let mut still_valid = true;
+            for p in [m.p1, m.p2] {
+                let (x, y, w, h) = Controller::calculate_cell_rect(&profile, p);
+                match capturer.capture_roi(x, y, w, h) {
+                    Ok(img) => {
+                        let (id, _) = matcher.match_cell(&image::DynamicImage::ImageRgba8(img));
+                        if id != m.tile_id {
+                            still_valid = false;
+                        }
+                    }
+                    Err(_) => still_valid = false,
+                }
+            }
+            if !still_valid {
+                println!(
+                    "[Recheck] {} <-> {} no longer shows Tile #{}. Skipping and re-scanning.",
+                    m.p1, m.p2, m.tile_id
+                );
+                failed_pairs.insert((m.p1, m.p2));
+                sleep(Duration::from_millis(60));
+                continue;
+            }
+        }
 
         match best_match {
             Some(m) => {
@@ -261,18 +348,17 @@ fn main() -> Result<()> {
                     ) {
                         Ok(true) => {
                             total_moves += 1;
-                            consecutive_failures = 0;
                         }
                         Ok(false) => {
                             eprintln!(
-                                "[Verification] Elimination check timeout at {} and {}. Retrying...",
+                                "[Verification] Elimination check timeout at {} and {}. Skipping this pair and re-scanning...",
                                 m.p1, m.p2
                             );
-                            consecutive_failures += 1;
+                            failed_pairs.insert((m.p1, m.p2));
                         }
                         Err(e) => {
                             eprintln!("[Controller] Click execution error: {:?}", e);
-                            consecutive_failures += 1;
+                            failed_pairs.insert((m.p1, m.p2));
                         }
                     }
                 } else {
@@ -280,13 +366,6 @@ fn main() -> Result<()> {
                     board.set_point(m.p1, EMPTY);
                     board.set_point(m.p2, EMPTY);
                     total_moves += 1;
-                    consecutive_failures = 0;
-                }
-
-                if consecutive_failures >= 5 {
-                    println!("[Engine] 5 consecutive execution failures. Pausing engine for safety.");
-                    paused = true;
-                    consecutive_failures = 0;
                 }
 
                 sleep(Duration::from_millis(args.move_delay_ms));
@@ -296,6 +375,8 @@ fn main() -> Result<()> {
                     "[Engine] No valid 3-segment move found. Remaining tiles: {}. Waiting / Deadlock detected.",
                     remaining
                 );
+                // Allow previously failed pairs to be retried after a pause.
+                failed_pairs.clear();
                 sleep(Duration::from_millis(200));
             }
         }

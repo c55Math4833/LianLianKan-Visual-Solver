@@ -30,7 +30,7 @@ pub struct MatcherProfile {
 }
 
 fn default_threshold() -> f32 {
-    0.82
+    0.75
 }
 fn default_empty_variance() -> f32 {
     15.0
@@ -59,6 +59,35 @@ fn default_verify_timeout() -> u64 {
     600
 }
 
+/// Optional game rules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RulesConfig {
+    /// true  = a connecting line may run outside the board (around the outer ring).
+    /// false = paths must stay inside the board (the outer ring is blocked).
+    #[serde(default = "default_allow_outer_path")]
+    pub allow_outer_path: bool,
+    /// When no move exists, retry once treating obstacle blocks as passable.
+    #[serde(default = "default_ignore_obstacles_when_stuck")]
+    pub ignore_obstacles_when_stuck: bool,
+}
+
+fn default_ignore_obstacles_when_stuck() -> bool {
+    true
+}
+
+fn default_allow_outer_path() -> bool {
+    true
+}
+
+impl Default for RulesConfig {
+    fn default() -> Self {
+        Self {
+            allow_outer_path: default_allow_outer_path(),
+            ignore_obstacles_when_stuck: default_ignore_obstacles_when_stuck(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameProfile {
     pub name: String,
@@ -67,6 +96,8 @@ pub struct GameProfile {
     pub matcher: MatcherProfile,
     #[serde(default)]
     pub timing: TimingConfig,
+    #[serde(default)]
+    pub rules: RulesConfig,
 }
 
 impl Default for MatcherProfile {

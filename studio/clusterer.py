@@ -6,7 +6,62 @@ Guarantees identical tiles are never split into multiple clusters and enforces P
 
 import cv2
 import numpy as np
-from sklearn.cluster import AgglomerativeClustering
+def agglomerative_clustering_precomputed(dist_mat, distance_threshold, linkage='average'):
+    """
+    Pure NumPy/Python implementation of Agglomerative Hierarchical Clustering with precomputed distances.
+    Supports 'average' and 'complete' linkage. Drop-in replacement for sklearn.cluster.AgglomerativeClustering.
+    """
+    n = dist_mat.shape[0]
+    if n == 0:
+        return np.array([], dtype=int)
+    if n == 1:
+        return np.array([0], dtype=int)
+        
+    clusters = {i: [i] for i in range(n)}
+    active = list(range(n))
+    curr_dist = dist_mat.copy().astype(float)
+    sizes = {i: 1 for i in range(n)}
+    
+    while len(active) > 1:
+        min_d = float('inf')
+        best_pair = None
+        for idx1 in range(len(active)):
+            i = active[idx1]
+            for idx2 in range(idx1 + 1, len(active)):
+                j = active[idx2]
+                d = curr_dist[i, j]
+                if d < min_d:
+                    min_d = d
+                    best_pair = (i, j)
+                    
+        if best_pair is None or min_d > distance_threshold:
+            break
+            
+        ci, cj = best_pair
+        si, sj = sizes[ci], sizes[cj]
+        for k in active:
+            if k == ci or k == cj:
+                continue
+            if linkage == 'complete':
+                new_d = max(curr_dist[ci, k], curr_dist[cj, k])
+            elif linkage == 'average':
+                new_d = (si * curr_dist[ci, k] + sj * curr_dist[cj, k]) / (si + sj)
+            else:
+                new_d = min(curr_dist[ci, k], curr_dist[cj, k])
+            curr_dist[ci, k] = new_d
+            curr_dist[k, ci] = new_d
+            
+        clusters[ci].extend(clusters[cj])
+        del clusters[cj]
+        sizes[ci] = si + sj
+        del sizes[cj]
+        active.remove(cj)
+        
+    labels = np.zeros(n, dtype=int)
+    for lbl, c_idx in enumerate(active):
+        for elem in clusters[c_idx]:
+            labels[elem] = lbl
+    return labels
 
 def compute_tile_similarity(tile1_img, tile2_img):
     """
@@ -78,13 +133,11 @@ def cluster_matchable_tiles(matchable_tiles):
 
     for linkage in ['average', 'complete']:
         for d in np.arange(0.12, 0.36, 0.01):
-            ac = AgglomerativeClustering(
-                n_clusters=None,
-                metric='precomputed',
-                linkage=linkage,
-                distance_threshold=d
+            labels = agglomerative_clustering_precomputed(
+                dist_mat,
+                distance_threshold=float(d),
+                linkage=linkage
             )
-            labels = ac.fit_predict(dist_mat)
             n_c = len(set(labels))
             counts = [int(np.sum(labels == k)) for k in range(n_c)]
             odd_cnt = sum(1 for c in counts if c % 2 != 0)

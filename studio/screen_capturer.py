@@ -1,11 +1,13 @@
 """
 LianLianKan Screen Capturer
-Ultra-fast, DPI-aware full-screen & multi-monitor capture for Windows using ctypes & Win32 GDI.
-Zero external library dependencies (uses Python standard library).
+Ultra-fast, DPI-aware full-screen, multi-monitor & window capture for Windows using ctypes & Win32 GDI.
+Zero external library dependencies (uses Python standard library & OpenCV).
 """
 
 import sys
+import time
 import numpy as np
+import cv2
 
 def get_system_monitors():
     """
@@ -93,6 +95,86 @@ def get_system_monitors():
         m['index'] = idx + 1
     return monitors
 
+def get_visible_windows():
+    """
+    Enumerates active visible top-level Windows GUI windows with physical client coordinates.
+    Filters out background system shells, tooltips, and minimized windows.
+    Returns a list of dicts:
+    [{
+        'index': 1,
+        'hwnd': 12345,
+        'title': '...',
+        'rect': (x, y, w, h), # physical screen client coordinates
+        'is_game_hint': bool
+    }, ...]
+    """
+    if sys.platform != "win32":
+        return []
+
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    try:
+        user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except Exception:
+        try:
+            user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+    hdesk = user32.OpenInputDesktop(0, False, 0x0100)
+
+    windows = []
+    ignored_titles = {
+        'Program Manager', 'Settings', 'Windows 输入体验', 'Windows Input Experience',
+        'DesktopWindowXamlSource', '', '任务切换', 'Task Switching', 'Windows 預設鎖定畫面'
+    }
+
+    game_keywords = ['連連看', '连连看', 'lianliankan', 'kyodai', 'game', 'llk', '遊戲', '游戏']
+
+    def enum_proc(hwnd, lp):
+        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        title = buf.value.strip()
+        if not title or title in ignored_titles:
+            return True
+
+        crect = wintypes.RECT()
+        user32.GetClientRect(hwnd, ctypes.byref(crect))
+        pt = wintypes.POINT(crect.left, crect.top)
+        user32.ClientToScreen(hwnd, ctypes.byref(pt))
+        cw = crect.right - crect.left
+        ch = crect.bottom - crect.top
+
+        if cw >= 180 and ch >= 180:
+            lower_t = title.lower()
+            is_game = any(kw in lower_t for kw in game_keywords)
+            windows.append({
+                'hwnd': hwnd,
+                'title': title,
+                'rect': (pt.x, pt.y, cw, ch),
+                'is_game_hint': is_game
+            })
+        return True
+
+    CB = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    if hdesk:
+        user32.EnumDesktopWindows(hdesk, CB(enum_proc), 0)
+    else:
+        user32.EnumWindows(CB(enum_proc), 0)
+
+    # Sort: game hints first, then title
+    windows.sort(key=lambda w: (not w['is_game_hint'], w['title']))
+    for idx, w in enumerate(windows):
+        w['index'] = idx + 1
+    return windows
+
 def capture_rect(x, y, width, height):
     """
     Captures an arbitrary physical screen rectangle via Win32 GDI BitBlt.
@@ -102,7 +184,6 @@ def capture_rect(x, y, width, height):
 
     import ctypes
     from ctypes import wintypes
-    import cv2
 
     user32 = ctypes.windll.user32
     gdi32 = ctypes.windll.gdi32
@@ -161,6 +242,43 @@ def capture_rect(x, y, width, height):
     bgr = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
     return bgr
 
+def capture_window(win_dict, bring_to_front=True):
+    """
+    Captures the client area of a specific window.
+    Returns (bgr_image, updated_win_dict).
+    """
+    if sys.platform != "win32":
+        raise OSError("Window capture is currently only supported on Windows")
+
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    hwnd = win_dict['hwnd']
+
+    if bring_to_front:
+        try:
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+            time.sleep(0.15)
+        except Exception:
+            pass
+
+    crect = wintypes.RECT()
+    user32.GetClientRect(hwnd, ctypes.byref(crect))
+    pt = wintypes.POINT(crect.left, crect.top)
+    user32.ClientToScreen(hwnd, ctypes.byref(pt))
+    cw = crect.right - crect.left
+    ch = crect.bottom - crect.top
+
+    if cw <= 0 or ch <= 0:
+        pt.x, pt.y, cw, ch = win_dict['rect']
+
+    updated_win = dict(win_dict)
+    updated_win['rect'] = (pt.x, pt.y, cw, ch)
+
+    img = capture_rect(pt.x, pt.y, cw, ch)
+    return img, updated_win
+
 def capture_screen(monitor=None):
     """
     Captures either a specific monitor or the primary monitor.
@@ -176,7 +294,6 @@ def capture_screen(monitor=None):
             target_monitor = monitors[monitor - 1]
 
     if target_monitor is None:
-        # Default to primary monitor
         for m in monitors:
             if m['is_primary']:
                 target_monitor = m
@@ -185,7 +302,6 @@ def capture_screen(monitor=None):
             target_monitor = monitors[0]
 
     if target_monitor is None:
-        # Fallback to standard primary metrics
         import ctypes
         user32 = ctypes.windll.user32
         w = user32.GetSystemMetrics(0)

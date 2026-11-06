@@ -5,7 +5,7 @@ pub mod matcher;
 pub mod profile;
 pub mod solver;
 
-pub use board::{Board, Point, EMPTY, OBSTACLE};
+pub use board::{Board, Point, EMPTY, OBSTACLE, UNKNOWN};
 pub use capture::{create_capturer, ScreenCapturer};
 pub use controller::Controller;
 pub use matcher::{Matcher, MatcherConfig};

@@ -104,7 +104,7 @@ engine.exe --max-moves 50 --delay 80
     }
   },
   "matcher": {
-    "threshold": 0.82,
+    "threshold": 0.75,
     "empty_variance_threshold": 15.0,
     "template_dir": "templates"
   },
@@ -112,6 +112,11 @@ engine.exe --max-moves 50 --delay 80
     "click_interval_ms": 30,
     "animation_delay_ms": 100,
     "verify_timeout_ms": 500
+  },
+  "rules": {
+    "allow_outer_path": true
   }
 }
 ```
+
+`rules.allow_outer_path`（可省略，預設 `true`）：設為 `false` 時連線不能繞行棋盤外圍，路徑只能在棋盤內。studio 產生的 `preview.html` 可直接切換此開關並下載新的 profile。

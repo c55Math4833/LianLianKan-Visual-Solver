@@ -1,8 +1,8 @@
 """
 LianLianKan Visual Studio CLI
 Supports:
-1. Live Screen Snip & Analyze (Multi-monitor DPI-aware, snap-to-grid auto-refinement)
-2. Existing Screenshot Image File Analysis (drag-and-drop, full auto-detection, snap-to-grid)
+1. Live Screen Snip & Snap-to-Grid Auto-Refinement (Multi-monitor DPI-aware)
+2. Existing Screenshot Image File Analysis (drag-and-drop, user-selected ROI)
 """
 
 import os
@@ -15,19 +15,22 @@ import numpy as np
 from grid_calibrator import (
     load_image,
     save_image,
-    detect_board_roi,
     refine_board_roi,
     estimate_adaptive_grid,
     slice_cells,
     draw_grid_overlay
 )
-from feature_extractor import extract_features
+from feature_extractor import extract_features, classify_cells
 from clusterer import cluster_matchable_tiles
 from exporter import export_all
-from screen_capturer import get_system_monitors, capture_screen
+from screen_capturer import (
+    get_system_monitors,
+    capture_screen
+)
 
 def find_default_image():
     candidates = [
+        "screenshot_board.png",
         "data/未命名.jpg",
         "data/未命名(3).jpg",
         "data/未命名(2).png",
@@ -58,14 +61,17 @@ def run_studio_pipeline(
     # 1. Load Image (from path or numpy array)
     if isinstance(image_input, str):
         if not os.path.exists(image_input):
-            raise FileNotFoundError(f"Input image not found: {image_input}")
+            raise FileNotFoundError(f"Input image file not found: {image_input}")
         img = load_image(image_input)
-        img_label = image_input
+        img_label = os.path.basename(image_input)
     elif isinstance(image_input, np.ndarray):
         img = image_input
-        img_label = "Screen Capture / In-Memory Image"
+        img_label = "<In-Memory Buffer>"
     else:
-        raise ValueError(f"Invalid image input type: {type(image_input)}")
+        raise ValueError("Invalid image input type: must be path str or numpy ndarray")
+        
+    if img is None:
+        raise ValueError(f"Failed to decode image from: {image_input}")
         
     h, w, _ = img.shape
     print(f"[1/6] Loaded image: {img_label} (W={w}, H={h})")
@@ -80,7 +86,7 @@ def run_studio_pipeline(
         print(" 已開啟視窗【Select Board ROI】：")
         print(" 1. 請使用滑鼠左鍵【拖曳框選】遊戲棋盤大略區域（系統會自動磁吸對齊磚塊外緣）")
         print(" 2. 框選完成後請按鍵盤【SPACE】或【ENTER】確認")
-        print(" 3. 若想【全自動演算法偵測】整體外框（免手動框選），請直接按【C】")
+        print(" 3. 框選範圍超出棋盤外緣請勿大於 1 個磚塊")
         print("=" * 60 + "\n")
         cv_roi = cv2.selectROI("Select Board ROI", img, fromCenter=False, showCrosshair=True)
         cv2.destroyAllWindows()
@@ -91,57 +97,60 @@ def run_studio_pipeline(
             if roi != rough_roi:
                 print(f"[網格對齊] 已自動校準至物理網格晶格: X={roi['x']}, Y={roi['y']}, W={roi['w']}, H={roi['h']}")
         else:
-            print("[ROI 自動偵測] 啟動全自動棋盤整體外框偵測演算法...")
-            roi = detect_board_roi(img)
+            raise RuntimeError("未框選棋盤（需用滑鼠拖曳框選並按 SPACE/ENTER 確認），已取消。")
     else:
-        print("[ROI 自動偵測] 啟動全自動週期網格邊界偵測演算法...")
-        roi = detect_board_roi(img)
-        
+        raise RuntimeError("需要使用者手動框選棋盤：請勿使用 --no-interactive，或以 --roi X Y W H 指定範圍。")
+
     print(f"[2/6] Board ROI: X={roi['x']}, Y={roi['y']}, W={roi['w']}, H={roi['h']}")
     
-    # 3. Adaptive Grid Estimation (Autocorrelation Signal Analysis)
-    roi_img = img[roi["y"]:roi["y"]+roi["h"], roi["x"]:roi["x"]+roi["w"]]
-    if roi_img.shape[0] < 20 or roi_img.shape[1] < 20:
-        raise ValueError(f"ROI area too small: {roi_img.shape}")
-        
-    grid_info = estimate_adaptive_grid(roi_img)
+    # 3. Adaptive Grid Estimation
+    rx, ry, rw, rh = roi["x"], roi["y"], roi["w"], roi["h"]
+    roi_crop = img[ry:ry+rh, rx:rx+rw]
+    
+    grid_info = estimate_adaptive_grid(roi_crop)
     rows = grid_info["rows"]
     cols = grid_info["cols"]
     print(f"[3/6] Adaptive Grid Detection: {rows} Rows x {cols} Columns")
     print(f"      Pitch: dx={grid_info['pitch_x']:.2f}px, dy={grid_info['pitch_y']:.2f}px")
     print(f"      Cell Size: {grid_info['cell_w']:.2f} x {grid_info['cell_h']:.2f} px")
     
-    # Draw and save grid overlay
+    # Save visualization of calibrated grid
     draw_grid_overlay(img, roi, rows, cols, output_path="debug_grid_on_roi.png")
     print("      Saved grid overlay visualization to debug_grid_on_roi.png")
     
-    # 4. Slicing and Feature Extraction
-    print(f"[4/6] Slicing {rows * cols} cells and extracting visual features...")
-    raw_cells = slice_cells(img, roi, rows, cols)
+    # 4. Slicing & Visual Feature Extraction
+    cells = slice_cells(img, roi, rows, cols)
+    print(f"[4/6] Slicing {len(cells)} cells and extracting visual features...")
     
     empty_cells = []
     obstacle_cells = []
     matchable_tiles = []
     all_cells_matrix = {}
     
-    for c in raw_cells:
-        feat = extract_features(c["image"])
-        c["features"] = feat
-        all_cells_matrix[(c["row"], c["col"])] = c
-        
-        if feat["type"] == "empty":
+    for c in cells:
+        c["features"] = extract_features(c["image"])
+        c["tile_type"] = c["features"].get("type", "matchable")
+    classify_cells(cells)
+
+    for c in cells:
+        r_idx = c["row"]
+        c_idx = c["col"]
+        tile_type = c["tile_type"]
+        all_cells_matrix[(r_idx, c_idx)] = c
+
+        if tile_type == "empty":
             empty_cells.append(c)
-        elif feat["type"] == "obstacle":
+        elif tile_type == "obstacle":
             obstacle_cells.append(c)
         else:
             matchable_tiles.append(c)
-            
+
     print(f"      Classification results:")
     print(f"      - Empty background cells: {len(empty_cells)}")
-    print(f"      - Obstacle stone blocks:  {len(obstacle_cells)} (coords: {[(oc['row'], oc['col']) for oc in obstacle_cells]})")
+    print(f"      - Obstacle stone blocks:  {len(obstacle_cells)} (coords: {[(ob['row'], ob['col']) for ob in obstacle_cells]})")
     print(f"      - Matchable tiles:        {len(matchable_tiles)}")
     
-    # 5. Parity-Constrained Clustering
+    # 5. Clusterer with Parity Constraint
     print(f"[5/6] Clustering {len(matchable_tiles)} matchable tiles with Parity Constraint...")
     clusters, parity_valid = cluster_matchable_tiles(matchable_tiles)
     print(f"      Formed {len(clusters)} distinct tile clusters.")
@@ -153,7 +162,7 @@ def run_studio_pipeline(
     else:
         print("      [WARNING] One or more clusters violated the parity constraint!")
         
-    # 6. Exporter (use export_roi_override if given for live screen coordinates)
+    # 6. Exporter
     exported_roi = export_roi_override if export_roi_override else roi
     print(f"[6/6] Exporting templates, game profile, and HTML preview...")
     profile = export_all(
@@ -190,12 +199,10 @@ def run_screen_snip_mode(
     output_preview="preview.html"
 ):
     """
-    Mode 1: Live Screen Snip
-    DPI-aware & Multi-monitor capable.
-    Supports user mouse drag (with auto snap-to-grid) or pure automatic board detection.
+    Mode 3: Live Screen Snip with Snap-to-Grid Alignment
     """
     print("\n" + "=" * 60)
-    print("        [模式 1：螢幕直接框選截圖 (多螢幕 & 高 DPI 支援)]")
+    print("      [模式 1：螢幕直接框選截圖 (多螢幕 & 高 DPI 支援)]")
     print("=" * 60)
     
     monitors = get_system_monitors()
@@ -235,13 +242,12 @@ def run_screen_snip_mode(
     print(f" 已開啟視窗【Screen Snip - {chosen_monitor['device']}】：")
     print(" 1. 使用滑鼠左鍵【拖曳框選】棋盤（系統會自動向內/向外磁吸對齊磚塊外緣）")
     print(" 2. 框選完畢後請按【SPACE】或【ENTER】確認")
-    print(" 3. 【全自動辨識整體外框】：直接按【C】或【ESC】，演算法將全自動搜尋棋盤！")
+    print(" 3. 框選範圍超出棋盤外緣請勿大於 1 個磚塊")
     print("=" * 60 + "\n")
 
-    win_title = f"Screen Snip - {chosen_monitor['device']} (SPACE/ENTER: Confirm, C: Auto-Detect)"
+    win_title = f"Screen Snip - {chosen_monitor['device']} (SPACE/ENTER: Confirm)"
     cv2.namedWindow(win_title, cv2.WINDOW_NORMAL)
     try:
-        # Move window to target monitor position before fullscreen
         cv2.moveWindow(win_title, chosen_monitor['rect'][0], chosen_monitor['rect'][1])
         cv2.resizeWindow(win_title, chosen_monitor['rect'][2], chosen_monitor['rect'][3])
         cv2.setWindowProperty(win_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
@@ -253,24 +259,20 @@ def run_screen_snip_mode(
 
     rx, ry, rw, rh = int(cv_roi[0]), int(cv_roi[1]), int(cv_roi[2]), int(cv_roi[3])
     
-    # Check if user dragged a valid region or requested auto-detect
-    if rw > 20 and rh > 20:
-        rough_roi = {"x": rx, "y": ry, "w": rw, "h": rh}
-        print(f"\n[手動框選] 取得大略範圍: X={rx}, Y={ry}, 寬={rw}, 高={rh}")
-        final_roi = refine_board_roi(screen_img, rough_roi)
-        if final_roi != rough_roi:
-            print(f"[網格對齊] 已自動校準至物理網格晶格: X={final_roi['x']}, Y={final_roi['y']}, 寬={final_roi['w']}, 高={final_roi['h']}")
-    else:
-        print("\n[自動辨識] 使用者未手動框選或按下 C，啟動全自動棋盤整體外框偵測...")
-        final_roi = detect_board_roi(screen_img)
-        print(f"[自動辨識] 成功鎖定盤面整體外框: X={final_roi['x']}, Y={final_roi['y']}, 寬={final_roi['w']}, 高={final_roi['h']}")
+    if not (rw > 20 and rh > 20):
+        print("\n[取消] 未手動框選棋盤，已結束。")
+        return None
+    rough_roi = {"x": rx, "y": ry, "w": rw, "h": rh}
+    print(f"\n[手動框選] 取得大略範圍: X={rx}, Y={ry}, 寬={rw}, 高={rh}")
+    final_roi = refine_board_roi(screen_img, rough_roi)
+    if final_roi != rough_roi:
+        print(f"[網格對齊] 已自動校準至物理網格晶格: X={final_roi['x']}, Y={final_roi['y']}, 寬={final_roi['w']}, 高={final_roi['h']}")
 
     fx, fy, fw, fh = final_roi["x"], final_roi["y"], final_roi["w"], final_roi["h"]
     cropped_board = screen_img[fy:fy+fh, fx:fx+fw]
     save_image(output_screenshot, cropped_board)
     print(f"[儲存] 已將盤面截圖存至: {os.path.abspath(output_screenshot)}")
 
-    # Calculate absolute physical screen coordinates across virtual desktop
     phys_x = chosen_monitor['rect'][0] + fx
     phys_y = chosen_monitor['rect'][1] + fy
     print(f"[實體座標] 虛擬桌面絕對實體座標: X={phys_x}, Y={phys_y}, W={fw}, H={fh}")
@@ -296,8 +298,7 @@ def run_existing_image_mode(
     output_preview="preview.html"
 ):
     """
-    Mode 2: Existing Image File Analysis
-    Loads image from path or prompts user to drag/enter file.
+    Mode 4: Existing Image File Analysis
     """
     if not image_path:
         default_img = find_default_image()
@@ -341,9 +342,9 @@ def run_existing_image_mode(
 
 def main():
     parser = argparse.ArgumentParser(description="LianLianKan Visual Studio")
-    parser.add_argument("--snip", "-s", action="store_true", help="Launch live screen snip mode (Mode 1)")
-    parser.add_argument("--monitor", "-m", type=int, default=None, help="Target monitor index for snip mode (1-based)")
-    parser.add_argument("--image", "-i", type=str, default=None, help="Path to input screenshot image (Mode 2)")
+    parser.add_argument("--snip", "-s", action="store_true", help="Launch interactive screen snip mode")
+    parser.add_argument("--monitor", "-m", type=int, default=None, help="Target monitor index (1-based)")
+    parser.add_argument("--image", "-i", type=str, default=None, help="Path to input screenshot image")
     parser.add_argument("--roi", nargs=4, type=int, metavar=('X', 'Y', 'W', 'H'), help="Manual ROI bounding box")
     parser.add_argument("--no-interactive", action="store_true", help="Disable interactive ROI selection GUI")
     parser.add_argument("--no-browser", action="store_true", help="Do not open preview.html in browser")
@@ -353,14 +354,13 @@ def main():
     
     args, unknown = parser.parse_known_args()
     
-    # Check if a file was passed as naked argument (e.g. dragged onto studio.exe in Windows Explorer)
     dragged_file = None
     if unknown:
         candidate = unknown[0].strip('"').strip("'")
         if os.path.exists(candidate) and os.path.isfile(candidate):
             dragged_file = candidate
 
-    # 1. Direct Mode 1 (Screen Snip)
+    # 1. Screen Snip Mode
     if args.snip:
         run_screen_snip_mode(
             monitor_index=args.monitor,
@@ -369,7 +369,7 @@ def main():
             output_profile=args.profile,
             output_preview=args.preview
         )
-    # 2. Direct Mode 2 (Image provided via argument or drag-and-drop)
+    # 2. Image Mode
     elif args.image or dragged_file:
         target_img = args.image if args.image else dragged_file
         roi_override = None
@@ -390,20 +390,22 @@ def main():
         )
     # 3. Interactive Menu Mode
     else:
-        print("\n" + "=" * 60)
+        print()
+        print("=" * 60)
         print("       LianLianKan Studio 盤面分析與特徵建模工具")
         print("=" * 60)
         print("請選擇分析模式：")
-        print("  [1] 螢幕直接框選（支援多螢幕選擇、高 DPI 縮放校正與磁吸對齊）")
-        print("  [2] 讀取現有截圖（支援手動拖曳檔案、全自動外框辨識與磁吸校正）")
+        print("  [1] 螢幕框選截圖 (滑鼠手動框選棋盤，框選範圍超出棋盤勿大於 1 個磚塊)")
+        print("  [2] 讀取現有截圖檔案 (支援拖曳圖片，並手動框選棋盤)")
         print("=" * 60)
-        
+
         try:
             choice = input("請選擇模式 [1/2] (預設 1): ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n已取消。")
+            print()
+            print("已取消。")
             return
-            
+
         if choice == "2":
             run_existing_image_mode(
                 open_browser=not args.no_browser,
