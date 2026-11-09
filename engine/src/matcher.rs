@@ -1,4 +1,5 @@
 use crate::board::{Board, EMPTY, OBSTACLE, UNKNOWN};
+use crate::profile::TileEntry;
 use anyhow::{bail, Result};
 use image::{imageops::FilterType, DynamicImage, RgbaImage};
 use std::path::Path;
@@ -113,6 +114,19 @@ impl Template {
     }
 }
 
+/// Same lookup order as studio: as written, relative to the profile, then by file name in the template folder.
+fn resolve_sample(file: &str, profile_dir: &Path, template_dir: &Path) -> Option<std::path::PathBuf> {
+    let base = Path::new(file).file_name()?.to_owned();
+    [
+        std::path::PathBuf::from(file),
+        profile_dir.join(file),
+        template_dir.join(&base),
+        profile_dir.join(template_dir).join(&base),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+}
+
 #[derive(Debug, Clone)]
 pub struct MatcherConfig {
     pub threshold: f32,
@@ -201,6 +215,39 @@ impl Matcher {
         }
 
         Ok(loaded)
+    }
+
+    /// Load the samples listed in a studio `tile_mapping`:
+    ///  - matchable: every file of the class becomes a template of that id (merged classes have several);
+    ///  - obstacle: every file becomes an OBSTACLE sample, whatever its class id;
+    ///  - empty: EMPTY sample.
+    /// Files are looked up as given, next to the profile, and in the template folder. Missing files
+    /// are reported and skipped. Returns how many templates were loaded.
+    pub fn load_templates_from_profile(&mut self, entries: &[TileEntry], profile_dir: &Path, template_dir: &Path) -> usize {
+        let mut loaded = 0;
+        for e in entries {
+            let id = match e.kind.as_str() {
+                "matchable" if e.id > 0 => e.id,
+                "obstacle" => OBSTACLE,
+                "empty" => EMPTY,
+                _ => continue,
+            };
+            for f in e.sample_files() {
+                let Some(path) = resolve_sample(f, profile_dir, template_dir) else {
+                    eprintln!("[Matcher] Warning: sample {:?} of class {} not found, skipped", f, e.id);
+                    continue;
+                };
+                match image::open(&path) {
+                    Ok(img) => {
+                        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("sample").to_string();
+                        self.add_template(id, &name, &img);
+                        loaded += 1;
+                    }
+                    Err(err) => eprintln!("[Matcher] Warning: cannot read {:?}: {}", path, err),
+                }
+            }
+        }
+        loaded
     }
 
     /// Nearest of the EMPTY / OBSTACLE samples by mean absolute colour difference.
@@ -384,6 +431,55 @@ mod tests {
 
         let (id, _) = matcher.match_cell(&DynamicImage::ImageLuma8(flat_img));
         assert_eq!(id, EMPTY);
+    }
+
+    fn stripes_img(vertical: bool) -> GrayImage {
+        let mut im = GrayImage::new(16, 16);
+        for y in 0..16 {
+            for x in 0..16 {
+                let on = if vertical { x % 2 == 0 } else { y % 2 == 0 };
+                im.put_pixel(x, y, Luma([if on { 230 } else { 20 }]));
+            }
+        }
+        im
+    }
+
+    #[test]
+    fn test_profile_mapping_merged_and_obstacle_samples() {
+        let dir = std::env::temp_dir().join(format!("llk_matcher_map_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let v = stripes_img(true);
+        let h = stripes_img(false);
+        let mut diag = GrayImage::new(16, 16);
+        for i in 0..16 {
+            for j in 0..16 {
+                diag.put_pixel(i, j, Luma([if (i + j) % 5 < 2 { 240 } else { 30 }]));
+            }
+        }
+        v.save(dir.join("1.png")).unwrap();
+        h.save(dir.join("2.png")).unwrap(); // merged into class 1
+        diag.save(dir.join("3.png")).unwrap(); // textured obstacle class
+        let entries: Vec<TileEntry> = serde_json::from_str(
+            r#"[{"id":1,"type":"matchable","file":"1.png","files":["1.png","2.png"],"merged_from":[2]},
+                {"id":3,"type":"obstacle","file":"3.png"},
+                {"id":9,"type":"matchable","file":"missing.png"}]"#,
+        )
+        .unwrap();
+
+        let mut m = Matcher::new(MatcherConfig {
+            threshold: 0.8,
+            empty_variance_threshold: 5.0,
+            cell_target_width: 16,
+            cell_target_height: 16,
+        });
+        let n = m.load_templates_from_profile(&entries, Path::new("."), &dir);
+        assert_eq!(n, 3, "two samples of class 1 + one obstacle sample; the missing file is skipped");
+
+        let id_of = |im: &GrayImage| m.match_cell(&DynamicImage::ImageLuma8(im.clone())).0;
+        assert_eq!(id_of(&v), 1);
+        assert_eq!(id_of(&h), 1, "the merged sample is recognised as class 1, not as its own tile");
+        assert_eq!(id_of(&diag), OBSTACLE, "an obstacle class is an obstacle, never a tile");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

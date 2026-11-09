@@ -45,7 +45,7 @@ fn load_png(path: &Path) -> Option<Image> {
     image::open(path).ok().map(|i| Image::from_rgb(&i.to_rgb8()))
 }
 
-fn resolve(file: &str, profile_dir: &Path, templates_dir: &Path) -> Option<PathBuf> {
+pub fn resolve(file: &str, profile_dir: &Path, templates_dir: &Path) -> Option<PathBuf> {
     let base = Path::new(file).file_name()?.to_owned();
     [
         PathBuf::from(file),
@@ -108,6 +108,55 @@ pub fn load_library(profile: &Value, profile_dir: &Path, templates_dir: &Path) -
     Ok((library, max_id))
 }
 
+
+/// Class list of an existing profile for the settings page: (templates, merge map, obstacle map).
+/// Merged classes are rebuilt from `merged_from` + `files` (files are in ascending id order of the group).
+pub fn editor_classes(profile: &Value, profile_dir: &Path, templates_dir: &Path) -> (Vec<Value>, Value, Value, String) {
+    let uri = |file: &str| -> String {
+        resolve(file, profile_dir, templates_dir)
+            .and_then(|p| load_png(&p))
+            .map(|i| image_data_uri(&i))
+            .unwrap_or_default()
+    };
+    let mut generic = String::new();
+    let mut tpls: Vec<(i64, Value)> = Vec::new();
+    let (mut merge, mut obstacle) = (serde_json::Map::new(), serde_json::Map::new());
+    for item in profile["tile_mapping"].as_array().cloned().unwrap_or_default() {
+        let id = item["id"].as_i64().unwrap_or(0);
+        let kind = item["type"].as_str().unwrap_or("");
+        if id == -1 {
+            generic = uri(item["file"].as_str().unwrap_or(""));
+        }
+        if id <= 0 || (kind != "matchable" && kind != "obstacle") {
+            continue;
+        }
+        let primary = item["file"].as_str().unwrap_or("").to_string();
+        let mut group: Vec<i64> = vec![id];
+        group.extend(item["merged_from"].as_array().map(|a| a.iter().filter_map(|v| v.as_i64()).collect::<Vec<_>>()).unwrap_or_default());
+        group.sort_unstable();
+        let files: Vec<String> = item["files"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+        let aligned = files.len() == group.len();
+        let mut spare = files.iter().filter(|f| **f != primary);
+        for (i, gid) in group.iter().enumerate() {
+            let file = if *gid == id {
+                primary.clone()
+            } else if aligned {
+                files[i].clone()
+            } else {
+                spare.next().cloned().unwrap_or_else(|| primary.clone())
+            };
+            tpls.push((*gid, json!({"id": gid, "file": file, "img": uri(&file)})));
+            if *gid != id {
+                merge.insert(gid.to_string(), json!(id));
+            }
+        }
+        if kind == "obstacle" {
+            obstacle.insert(id.to_string(), json!(true));
+        }
+    }
+    tpls.sort_by_key(|t| t.0);
+    (tpls.into_iter().map(|t| t.1).collect(), Value::Object(merge), Value::Object(obstacle), generic)
+}
 
 pub fn augment_from_board(board: &Image, profile_path: &Path, templates_dir: &Path, preview_path: &Path) -> Result<Summary> {
     let mut profile: Value = serde_json::from_str(

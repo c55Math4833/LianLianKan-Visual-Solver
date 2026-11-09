@@ -25,6 +25,7 @@ button:hover{border-color:var(--blue)}button.primary{background:#1f6feb;border-c
 .cell.sel{outline:3px solid var(--yel);z-index:1}.cell.hl{outline:3px solid var(--green);z-index:1}
 .cell.edited::before{content:"";position:absolute;top:1px;left:1px;width:7px;height:7px;border-radius:50%;background:var(--red)}
 .tag{position:absolute;bottom:0;right:1px;font:9px monospace;background:rgba(0,0,0,.75);padding:0 2px;border-radius:2px}
+h3{margin:14px 0 8px;font-size:14px;color:var(--tx2)}
 .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}
 .card{background:#161b22;border:1px solid var(--bd);border-radius:8px;padding:10px;display:flex;gap:12px;align-items:center}
 .card.odd{border-color:var(--red)}.card.merged{opacity:.55}
@@ -32,18 +33,25 @@ button:hover{border-color:var(--blue)}button.primary{background:#1f6feb;border-c
 .card .f{display:flex;flex-direction:column;gap:5px;font-size:12px;flex:1}
 .card label{color:var(--tx2)}
 .hint{font-size:12px;color:var(--tx2);margin-top:8px}
+.so .gonly{display:none!important}
+.sonly{display:none}.so .sonly{display:block}
+.setgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.setrow{display:flex;flex-direction:column;gap:4px;font-size:13px}
+.setrow input[type=number]{background:#0d1117;color:var(--tx);border:1px solid #444c56;border-radius:6px;padding:6px 8px;width:140px;font-size:14px}
+.setrow .d{color:var(--tx2);font-size:12px}
+.setrow.chg b{color:var(--yel)}
 </style>
 </head>
 <body>
 <h1>LianLianKan Studio 編輯器</h1>
-<div class="sub">點選棋盤格子（可多選）改類別；在下方類別庫設定「障礙物」或「合併到」其他類別。紅點＝手動修改過的格子。</div>
+<div class="sub gonly">點選棋盤格子（可多選）改類別；在下方類別庫設定「障礙物」或「合併到」其他類別。紅點＝手動修改過的格子。</div>
 
-<div class="bar">
+<div class="bar gonly">
   <span id="parity" class="badge"></span>
   <span class="stats" id="stats"></span>
 </div>
 
-<div class="section">
+<div class="section gonly">
   <h2>棋盤（<span id="dim"></span>）</h2>
   <div class="bar">
     <span>已選 <b id="selN">0</b> 格 →</span>
@@ -51,6 +59,7 @@ button:hover{border-color:var(--blue)}button.primary{background:#1f6feb;border-c
     <button onclick="setSel('obstacle')">設為障礙物</button>
     <select id="selCls"></select>
     <button onclick="setSelCls()">設為此類別</button>
+    <button onclick="newClsFromSel()" title="自動辨識分不開時：選取該物件的格子，以第一格圖樣建立新類別">＋以所選格建立新類別</button>
     <button onclick="clearOv()">還原所選格</button>
     <button onclick="sel.clear();render()">取消選取</button>
   </div>
@@ -60,11 +69,33 @@ button:hover{border-color:var(--blue)}button.primary{background:#1f6feb;border-c
 
 <div class="section">
   <h2>類別庫</h2>
+  <div class="hint sonly" style="margin:0 0 10px">由 game_profile.json 還原的類別清單：可調整「用途」（一般磚塊／障礙物）與「合併到」，按儲存後寫回 profile。要重新分類格子請用截圖流程。</div>
+  <div class="bar">
+    <button onclick="document.getElementById('upTile').click()">＋上傳圖片新增磚塊類別</button>
+    <button onclick="document.getElementById('upObs').click()">＋上傳圖片新增障礙物樣本</button>
+    <button class="gonly" onclick="newClsFromSel(true)" title="選取棋盤上的障礙物格子，以第一格圖樣建立障礙物樣本">＋以所選格建立障礙物樣本</button>
+    <input type="file" id="upTile" accept="image/*" hidden onchange="addFromFile(this,false)">
+    <input type="file" id="upObs" accept="image/*" hidden onchange="addFromFile(this,true)">
+  </div>
+  <h3>一般磚塊</h3>
   <div class="gallery" id="gallery"></div>
+  <h3>障礙物（每種障礙物各放一張樣本，引擎才認得）</h3>
+  <div class="gallery" id="galleryObs"></div>
+</div>
+
+<div class="section">
+  <h2>引擎設定</h2>
+  <div class="sub" style="margin-bottom:10px">這些值會寫進 game_profile.json，引擎下次啟動時讀取。黃色標題＝已改成與原檔不同。</div>
+  <div class="setgrid" id="settings"></div>
+  <div class="bar"><button onclick="resetSettings()">全部恢復引擎預設值</button></div>
 </div>
 
 <div class="section">
   <h2>輸出</h2>
+  <div class="bar">
+    <button class="primary" id="saveBtn" hidden onclick="saveProject()" title="Ctrl+S">儲存到專案（game_profile.json＋新增模板）</button>
+    <span id="saveMsg" style="font-size:13px"></span>
+  </div>
   <div class="bar">
     <button class="primary" onclick="dlProfile()">下載更新後的 game_profile.json</button>
     <button onclick="dlConfig()">匯出編輯設定 studio_config.json</button>
@@ -75,19 +106,78 @@ button:hover{border-color:var(--blue)}button.primary{background:#1f6feb;border-c
   <div class="bar">
     <label><input type="checkbox" id="outer" onchange="setOuter(this.checked)"> 允許連線繞行棋盤外圍（取消勾選＝不能走外圍，路徑只能在棋盤內）</label>
   </div>
-  <div class="hint">編輯內容會自動存在此瀏覽器（localStorage）。下載的 game_profile.json 取代原檔即可；合併後的類別以 "files" 列出所有樣本，障礙物類別 type 為 "obstacle"。</div>
+  <div class="hint" id="dlHint" hidden>目前由 studio 內建伺服器提供：按「儲存到專案」（或 Ctrl+S）會直接寫入 game_profile.json 與模板資料夾；重新截圖後此頁會自動更新。下方的下載按鈕僅作備用。</div>
+  <div class="hint">編輯內容會自動存在此瀏覽器（localStorage）。下載的 game_profile.json 取代原檔即可；合併後的類別以 "files" 列出所有樣本，障礙物類別 type 為 "obstacle"。若有「新增」類別，下載 game_profile.json 時會一併下載其 PNG（檔名＝類別 ID），請放進模板資料夾（與 profile 內 file 路徑一致）。</div>
 </div>
 
 <script>
 const D = __DATA__;
-const KEY = "llk-edit:" + D.rows + "x" + D.cols + ":" + D.templates.map(t=>t.id).join(",");
+const KEY = (D.settingsOnly ? "llk-set:" : "llk-edit:") + "" + D.rows + "x" + D.cols + ":" + D.templates.map(t=>t.id).join(",");
 const CELL = __CELL__;
-let state = {cellOv:{}, merge:{}, obstacle:{}, allowOuter:null};
+function freshState(){
+  const st = {cellOv:{}, merge:{}, obstacle:{}, allowOuter:null, newCls:{}, settings:{}};
+  if (D.settingsOnly && D.initState){ Object.assign(st.merge, D.initState.merge||{}); Object.assign(st.obstacle, D.initState.obstacle||{}); }
+  return st;
+}
+let state = freshState();
+// all classes = auto-detected templates + classes the user created from a board cell
+function TPL(){
+  const extra = Object.keys(state.newCls||{}).map(k=>state.newCls[k]);
+  return D.templates.concat(extra);
+}
+function tplDir(){
+  const f = (D.templates[0] && D.templates[0].file) || "";
+  const i = Math.max(f.lastIndexOf("/"), f.lastIndexOf("\\"));
+  return i>=0 ? f.slice(0,i) : ((D.profile.matcher&&D.profile.matcher.template_dir)||"templates");
+}
+function makeNew(img, asObs){
+  if (!state.newCls) state.newCls={};
+  const id=Math.max(0,...TPL().map(t=>t.id))+1;
+  state.newCls[id]={id:id, file:tplDir()+"/"+id+".png", img:img, isNew:true};
+  if (asObs) state.obstacle[id]=true;
+  return id;
+}
+function newClsFromSel(asObs){
+  if (!sel.size){ alert("請先選取至少一格（以第一格的圖當作新類別樣本）"); return; }
+  const ks=[...sel], first=D.cells.find(c=>c.r+","+c.c===ks[0]);
+  const id=makeNew(first.img, asObs===true);
+  ks.forEach(k=>state.cellOv[k]="tile:"+id);
+  done();
+}
+function addFromFile(inp, asObs){
+  const f=inp.files[0]; inp.value=""; if(!f) return;
+  const r=new FileReader();
+  r.onload=()=>{ const im=new Image();
+    im.onload=()=>{ const c=document.createElement("canvas"); c.width=45; c.height=45;
+      c.getContext("2d").drawImage(im,0,0,45,45); makeNew(c.toDataURL("image/png"), asObs); done(); };
+    im.onerror=()=>alert("無法讀取這張圖片");
+    im.src=r.result; };
+  r.readAsDataURL(f);
+}
+function delNewCls(id){
+  delete state.newCls[id]; delete state.merge[id]; delete state.obstacle[id];
+  Object.keys(state.merge).forEach(k=>{ if(state.merge[k]===id) delete state.merge[k]; });
+  Object.keys(state.cellOv).forEach(k=>{ if(state.cellOv[k]==="tile:"+id) delete state.cellOv[k]; });
+  if (hl===id) hl=null;
+  done();
+}
+function pngOf(t){
+  return new Promise(res=>{
+    const im=new Image();
+    im.onload=()=>{ const c=document.createElement("canvas"); c.width=45; c.height=45;
+      c.getContext("2d").drawImage(im,0,0,45,45); c.toBlob(res,"image/png"); };
+    im.src=t.img;
+  });
+}
 function outerOn(){ return state.allowOuter===null || state.allowOuter===undefined ? !(D.profile.rules && D.profile.rules.allow_outer_path===false) : !!state.allowOuter; }
 function setOuter(v){ state.allowOuter=v; save(); }
-try { const s = localStorage.getItem(KEY); if (s) state = JSON.parse(s); } catch(e) {}
+// settings page: the profile on disk is the source of truth, so no stale browser copy is restored
+if (!D.settingsOnly) { try { const s = localStorage.getItem(KEY); if (s) state = JSON.parse(s); } catch(e) {} }
+if (!state.newCls) state.newCls = {};
+if (!state.settings) state.settings = {};
+if (D.settingsOnly) document.body.classList.add("so");
 let sel = new Set(), hl = null;
-function save(){ try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){} }
+function save(){ if (D.settingsOnly) return; try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){} }
 function pad(n){ return String(n).padStart(2,"0"); }
 function root(id){ let n=0; while (state.merge[id]!=null && n++<50) id = state.merge[id]; return id; }
 function eff(cell){
@@ -113,7 +203,7 @@ function setSel(t){ sel.forEach(k=>state.cellOv[k]=t); done(); }
 function setSelCls(){ const v=document.getElementById("selCls").value; if(!v) return; sel.forEach(k=>state.cellOv[k]="tile:"+v); done(); }
 function clearOv(){ sel.forEach(k=>delete state.cellOv[k]); done(); }
 function done(){ save(); render(); }
-function resetAll(){ if(confirm("清除所有手動修改？")){ state={cellOv:{},merge:{},obstacle:{},allowOuter:null}; sel.clear(); hl=null; done(); } }
+function resetAll(){ if(confirm("清除所有手動修改？")){ state=freshState(); sel.clear(); hl=null; done(); } }
 function toggle(k){ if(sel.has(k)) sel.delete(k); else sel.add(k); render(); }
 function pickClass(id){
   hl = (hl===id) ? null : id; sel.clear();
@@ -132,6 +222,7 @@ function setMerge(id,v){
   done();
 }
 function render(){
+  renderSettings();
   const cn=counts(), m=cn.m;
   document.getElementById("dim").textContent = D.rows+" 列 × "+D.cols+" 欄";
   const odd = D.augment ? [] : Object.keys(m).filter(k=>m[k]%2);
@@ -151,53 +242,141 @@ function render(){
     const cls=["cell",x.type,sel.has(k)?"sel":"",(hl!==null&&x.type==="matchable"&&x.id===hl)?"hl":"",state.cellOv[k]?"edited":""].join(" ");
     return '<div class="'+cls+'" title="('+c.r+','+c.c+') '+x.type+' '+x.id+'" onclick="toggle(\''+k+'\')"><img src="'+c.img+'"><span class="tag">'+tag+'</span></div>';
   }).join("");
-  const live = D.templates.filter(t=>state.merge[t.id]==null && !state.obstacle[t.id]);
+  const live = TPL().filter(t=>state.merge[t.id]==null && !state.obstacle[t.id]);
   const sc=document.getElementById("selCls"), old=sc.value;
   sc.innerHTML = '<option value="">選擇類別…</option>'+live.map(t=>'<option value="'+t.id+'">T'+pad(t.id)+'（'+(m[t.id]||0)+'）</option>').join("");
   sc.value=old;
-  document.getElementById("gallery").innerHTML = D.templates.map(t=>{
+  const card = t=>{
     const merged = state.merge[t.id]!=null, n=m[t.id]||0;
-    const targets = D.templates.filter(x=>x.id!==t.id && state.merge[x.id]==null && !state.obstacle[x.id]);
-    const absorbed = D.templates.filter(x=>x.id!==t.id && root(x.id)===t.id).map(x=>"T"+x.id);
+    const isObs = !!state.obstacle[t.id];
+    // merge only within the same role: tiles into tiles, obstacle samples into obstacle samples
+    const targets = TPL().filter(x=>x.id!==t.id && state.merge[x.id]==null && !!state.obstacle[x.id]===isObs);
+    const absorbed = TPL().filter(x=>x.id!==t.id && root(x.id)===t.id).map(x=>"T"+x.id);
     const status = merged ? "已合併到 T"+root(t.id)
-      : "本張數量：<b>"+n+"</b>"+((!D.augment&&n%2)?" ⚠奇數":"")+(absorbed.length?"（含 "+absorbed.join(", ")+"）":"");
+      : (D.settingsOnly ? (absorbed.length?"含 "+absorbed.join(", "):"")
+        : "本張數量：<b>"+n+"</b>"+((!D.augment&&n%2)?" ⚠奇數":"")+(absorbed.length?"（含 "+absorbed.join(", ")+"）":""));
     return '<div class="card'+((!D.augment&&!merged&&n%2)?" odd":"")+(merged?" merged":"")+'">'
      +'<img src="'+t.img+'" onclick="pickClass('+t.id+')" title="點擊高亮並選取此類別所有格子">'
-     +'<div class="f"><b>tile_'+pad(t.id)+' (ID '+t.id+')</b><span>'+status+'</span>'
+     +'<div class="f"><b>tile_'+pad(t.id)+' (ID '+t.id+')'+(t.isNew?' <span class="badge pass">新增</span> <button onclick="delNewCls('+t.id+')">刪除</button>':'')+'</b><span>'+status+'</span>'
      +'<label>用途 <select onchange="setRole('+t.id+',this.value)"><option value="tile">一般磚塊</option><option value="obstacle"'+(state.obstacle[t.id]?' selected':'')+'>障礙物</option></select></label>'
      +'<label>合併到 <select onchange="setMerge('+t.id+',this.value)"><option value="">（不合併）</option>'
      +targets.map(x=>'<option value="'+x.id+'"'+(state.merge[t.id]===x.id?' selected':'')+'>T'+pad(x.id)+'</option>').join("")
      +'</select></label></div></div>';
-  }).join("");
+  };
+  const all = TPL();
+  document.getElementById("gallery").innerHTML = all.filter(t=>!state.obstacle[t.id]).map(card).join("");
+  const gen = D.genericObstacle || ((D.cells.find(c=>c.type==="obstacle")||{}).img) || "";
+  const genCard = gen ? '<div class="card"><img src="'+gen+'"><div class="f"><b>通用障礙物樣本 (ID -1)</b><span>未另外建立樣本的障礙物格，都以這張當樣本。</span></div></div>' : "";
+  document.getElementById("galleryObs").innerHTML = genCard + all.filter(t=>state.obstacle[t.id]).map(card).join("");
 }
 function dl(name,obj){
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob([JSON.stringify(obj,null,2)],{type:"application/json"}));
   a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 }
-function dlConfig(){ dl("studio_config.json",{version:1,board:{rows:D.rows,cols:D.cols},cellOv:state.cellOv,merge:state.merge,obstacle:state.obstacle,allowOuter:outerOn()}); }
+function dlConfig(){ dl("studio_config.json",{version:1,board:{rows:D.rows,cols:D.cols},cellOv:state.cellOv,merge:state.merge,obstacle:state.obstacle,newCls:state.newCls,settings:state.settings,allowOuter:outerOn()}); }
 function impConfig(inp){
   const f=inp.files[0]; if(!f) return;
   const r=new FileReader();
   r.onload=()=>{ try{ const j=JSON.parse(r.result);
-    state={cellOv:j.cellOv||{},merge:j.merge||{},obstacle:j.obstacle||{},allowOuter:(typeof j.allowOuter==="boolean")?j.allowOuter:null}; done(); }catch(e){ alert("設定檔格式錯誤"); } };
+    state={cellOv:j.cellOv||{},merge:j.merge||{},obstacle:j.obstacle||{},newCls:j.newCls||{},settings:j.settings||{},allowOuter:(typeof j.allowOuter==="boolean")?j.allowOuter:null}; done(); }catch(e){ alert("設定檔格式錯誤"); } };
   r.readAsText(f);
 }
-function dlProfile(){
+// ---- engine settings (timing / matcher / rules) ----
+const SET_DEFS = [
+  {k:"timing.click_interval_ms", g:"時間", t:"int", def:35, min:0, max:5000, label:"點擊間隔 (ms)", d:"連續兩次點擊之間的等待。太小遊戲可能漏接點擊，太大會變慢。"},
+  {k:"timing.animation_delay_ms", g:"時間", t:"int", def:120, min:0, max:10000, label:"消除動畫等待 (ms)", d:"兩次點擊成對之後，等待消除動畫的時間，再去驗證棋盤。"},
+  {k:"timing.verify_timeout_ms", g:"時間", t:"int", def:600, min:0, max:30000, label:"驗證逾時 (ms)", d:"等待棋盤變化（確認消除成功）的最長時間，超過視為失敗。"},
+  {k:"matcher.threshold", g:"辨識", t:"float", def:0.75, min:0, max:1, step:0.01, label:"磚塊比對門檻 (0–1)", d:"相似度達到此值才認定是該類別；調低會把更多格子認成磚塊，但誤判變多。"},
+  {k:"matcher.empty_variance_threshold", g:"辨識", t:"float", def:15, min:0, max:255, step:0.5, label:"空格判定變異量", d:"格子中央顏色標準差低於此值視為空格。"},
+  {k:"rules.ignore_obstacles_when_stuck", g:"規則", t:"bool", def:true, label:"卡關時忽略障礙物重試", d:"找不到可消除組合時，把障礙物當成可通過再試一次。"}
+];
+function getPath(o,k){ return k.split(".").reduce((a,x)=>a==null?undefined:a[x],o); }
+function setPath(o,k,v){ const ks=k.split("."); let a=o; ks.slice(0,-1).forEach(x=>{ if(typeof a[x]!=="object"||a[x]===null) a[x]={}; a=a[x]; }); a[ks[ks.length-1]]=v; }
+function getSet(df){
+  if (state.settings[df.k]!==undefined) return state.settings[df.k];
+  const v = getPath(D.profile, df.k);
+  return v===undefined ? df.def : v;
+}
+function setSetting(k,raw){
+  const df=SET_DEFS.find(x=>x.k===k); let v;
+  if (df.t==="bool") v=!!raw;
+  else { v = df.t==="int" ? parseInt(raw,10) : parseFloat(raw);
+    if (!isFinite(v)) { renderSettings(); return; }
+    v = Math.min(df.max, Math.max(df.min, v)); }
+  state.settings[k]=v; save(); renderSettings();
+}
+function resetSettings(){ SET_DEFS.forEach(df=>state.settings[df.k]=df.def); save(); renderSettings(); }
+function renderSettings(){
+  const el=document.getElementById("settings"); if(!el) return;
+  el.innerHTML = SET_DEFS.map(df=>{
+    const v=getSet(df), orig=getPath(D.profile,df.k), chg = orig!==undefined ? v!==orig : v!==df.def;
+    const inp = df.t==="bool"
+      ? '<label><input type="checkbox" '+(v?'checked ':'')+'onchange="setSetting(&quot;'+df.k+'&quot;,this.checked)"> 啟用</label>'
+      : '<input type="number" min="'+df.min+'" max="'+df.max+'" step="'+(df.step||1)+'" value="'+v+'" onchange="setSetting(&quot;'+df.k+'&quot;,this.value)">';
+    return '<div class="setrow'+(chg?' chg':'')+'"><b>['+df.g+'] '+df.label+'</b>'+inp+'<span class="d">'+df.d+'（預設 '+df.def+'）</span></div>';
+  }).join("");
+}
+function buildProfile(){
   const p = JSON.parse(JSON.stringify(D.profile));
-  const base = p.tile_mapping.filter(t=>t.type!=="matchable");
+  // settings page rebuilds every class from the restored list, so only the generic empty/obstacle samples (id <= 0) are kept
+  const base = p.tile_mapping.filter(t=> D.settingsOnly ? !(t.id>0) : t.type!=="matchable");
   const out = [];
-  D.templates.forEach(t=>{
+  const pending = [];
+  TPL().forEach(t=>{
     if (state.merge[t.id]!=null) return;               // absorbed into another class
-    const group = D.templates.filter(x=>root(x.id)===t.id);
+    if (t.isNew) pending.push(t);
+    const group = TPL().filter(x=>root(x.id)===t.id);
     const item = {id:t.id, type: state.obstacle[t.id]?"obstacle":"matchable", file:t.file};
     if (group.length>1){ item.files = group.map(x=>x.file); item.merged_from = group.filter(x=>x.id!==t.id).map(x=>x.id); }
     out.push(item);
   });
   p.tile_mapping = base.concat(out);
+  if (!D.settingsOnly) p.studio_edits = {cellOv:state.cellOv, merge:state.merge, obstacle:state.obstacle};
   p.rules = Object.assign({}, p.rules, {allow_outer_path: outerOn()});
-  p.studio_edits = {cellOv:state.cellOv, merge:state.merge, obstacle:state.obstacle};
+  SET_DEFS.forEach(df=>setPath(p, df.k, getSet(df)));
+  return {p:p, pending:pending};
+}
+function dlProfile(){
+  const b = buildProfile(), p = b.p, pending = b.pending;
   dl("game_profile.json", p);
+  // user-created classes have no file on disk yet: download their 45x45 PNGs (put them in the template folder)
+  pending.forEach((t,i)=>setTimeout(()=>pngOf(t).then(b=>{
+    const a=document.createElement("a"); a.href=URL.createObjectURL(b);
+    a.download=t.id+".png"; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  }), 400*(i+1)));
+}
+// ---- local studio server (served over http://127.0.0.1): save straight into the project + auto refresh ----
+const TOKEN = "__LLK_TOKEN__", VER = "__LLK_VER__";
+const SERVER = location.protocol === "http:" && TOKEN.indexOf("__") !== 0;
+function msg(t, ok){ const e=document.getElementById("saveMsg"); e.textContent=t; e.style.color = ok===false ? "var(--red)" : "var(--green)"; }
+function blobB64(b){ return new Promise(res=>{ const r=new FileReader(); r.onload=()=>res(String(r.result).split(",")[1]); r.readAsDataURL(b); }); }
+let saving = false;
+async function saveProject(){
+  if (!SERVER || saving) return;
+  saving = true; msg("儲存中…");
+  try{
+    const b = buildProfile(), pngs = [];
+    for (const t of b.pending) pngs.push({name:t.id+".png", data: await blobB64(await pngOf(t))});
+    const r = await fetch("/save", {method:"POST", headers:{"X-LLK-Token":TOKEN,"Content-Type":"application/json"}, body:JSON.stringify({profile:b.p, pngs:pngs})});
+    const t = await r.text();
+    if (!r.ok) throw new Error(t);
+    const j = JSON.parse(t);
+    msg("已儲存 → "+j.profile+(j.pngs?("，新增模板 "+j.pngs+" 張"):"")+"（"+new Date().toLocaleTimeString()+"）");
+  }catch(e){ msg("儲存失敗："+e.message+"（若伺服器已重啟，請重新整理頁面）", false); }
+  saving = false;
+}
+if (SERVER){
+  document.getElementById("saveBtn").hidden = false;
+  document.getElementById("dlHint").hidden = false;
+  document.addEventListener("keydown", e=>{ if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="s"){ e.preventDefault(); saveProject(); } });
+  let down = false;
+  setInterval(()=>{
+    fetch("/version", {cache:"no-store"}).then(r=>r.text()).then(v=>{
+      if (down){ down=false; msg(""); }
+      if (v.trim() !== VER) location.reload();               // studio regenerated the preview: pick up the new data
+    }).catch(()=>{ if(!down){ down=true; msg("與 studio 的連線中斷（程式已關閉？）", false); } });
+  }, 2000);
 }
 render();
 </script>

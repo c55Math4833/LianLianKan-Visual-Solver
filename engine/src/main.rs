@@ -123,6 +123,7 @@ fn create_sample_profile_if_missing(path: &Path) -> Result<()> {
                 verify_timeout_ms: 500,
             },
             rules: Default::default(),
+            tile_mapping: Vec::new(),
         };
         sample.save_to_file(path)?;
     }
@@ -270,7 +271,25 @@ fn run(args: &EngineArgs, skip_start: bool) -> Result<()> {
         ..Default::default()
     });
 
-    if tmpl_dir.exists() {
+    // studio profiles list the classes (merged samples, obstacle samples) in `tile_mapping`: use it,
+    // unless a template folder was forced on the command line.
+    let mut from_profile = 0;
+    if !profile.tile_mapping.is_empty() && args.templates_dir.is_none() {
+        let pdir = args
+            .profile_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        from_profile = matcher.load_templates_from_profile(&profile.tile_mapping, &pdir, &tmpl_dir);
+        println!(
+            "[Matcher] Loaded {} template(s) from the profile tile_mapping",
+            from_profile
+        );
+    }
+    if from_profile > 0 {
+        // nothing more to load
+    } else if tmpl_dir.exists() {
         let count = matcher.load_templates_from_dir(&tmpl_dir)?;
         println!(
             "[Matcher] Loaded {} template(s) from {:?}",

@@ -158,8 +158,29 @@ pub fn write_editor_html(
         "cells": cell_json,
         "templates": templates,
     });
-    let payload = serde_json::to_string(&data)?.replace("</", "<\\/");
-    let cell_px = if rows.max(cols) <= 20 { 48 } else { 32 };
+    write_page(&data, rows.max(cols), preview_path)
+}
+
+/// Settings-only page (no board / classes): edits timing, matcher and rules of an existing profile.
+pub fn write_settings_html(profile: &Value, templates: Vec<Value>, merge: Value, obstacle: Value, generic_obstacle: String, preview_path: &Path) -> Result<()> {
+    let n = |k: &str| profile["board"][k].as_u64().unwrap_or(0) as usize;
+    let data = json!({
+        "rows": n("rows"),
+        "cols": n("cols"),
+        "augment": false,
+        "settingsOnly": true,
+        "profile": profile,
+        "cells": [],
+        "templates": templates,
+        "genericObstacle": generic_obstacle,
+        "initState": {"merge": merge, "obstacle": obstacle},
+    });
+    write_page(&data, 0, preview_path)
+}
+
+fn write_page(data: &Value, max_dim: usize, preview_path: &Path) -> Result<()> {
+    let payload = serde_json::to_string(data)?.replace("</", "<\\/");
+    let cell_px = if max_dim <= 20 { 48 } else { 32 };
     let html = EDITOR_HTML.replace("__DATA__", &payload).replace("__CELL__", &cell_px.to_string());
     std::fs::write(preview_path, html)?;
     Ok(())

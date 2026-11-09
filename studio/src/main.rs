@@ -21,6 +21,7 @@ mod export;
 mod features;
 mod imgproc;
 mod select;
+mod serve;
 
 use anyhow::{bail, Context, Result};
 use calibrate::{estimate_adaptive_grid, refine_board_roi, slice_cells, Roi};
@@ -30,11 +31,15 @@ use imgproc::{resize, Image};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
 struct Args {
+    /// started without a mode: show the menu and come back to it after every action
+    interactive: bool,
     image: Option<PathBuf>,
     snip: bool,
     add: bool,
     reroi: bool,
+    settings: bool,
     select: bool,
     selftest: bool,
     monitor: Option<usize>,
@@ -46,6 +51,7 @@ struct Args {
     dump: Option<PathBuf>,
     screenshot: PathBuf,
     open: Option<bool>,
+    no_serve: bool,
 }
 
 fn parse_roi(a: &[String], i: usize) -> Result<Roi> {
@@ -66,10 +72,12 @@ fn parse_args() -> Result<Args> {
         a = vec![a[0].clone(), "--image".into(), f, "--select".into()];
     }
     let mut args = Args {
+        interactive: false,
         image: None,
         snip: false,
         add: false,
         reroi: false,
+        settings: false,
         select: false,
         selftest: false,
         monitor: None,
@@ -81,6 +89,7 @@ fn parse_args() -> Result<Args> {
         dump: None,
         screenshot: PathBuf::from("screenshot_board.png"),
         open: None,
+        no_serve: false,
     };
     let mut i = 1;
     while i < a.len() {
@@ -90,6 +99,7 @@ fn parse_args() -> Result<Args> {
             "--snip" | "-s" => args.snip = true,
             "--add" => args.add = true,
             "--reroi" => args.reroi = true,
+            "--settings" => args.settings = true,
             "--select" => args.select = true,
             "--self-test-window" => args.selftest = true,
             "--monitor" | "-m" => { args.monitor = Some(next(i)?.parse().context("--monitor needs a number")?); i += 1; }
@@ -100,73 +110,58 @@ fn parse_args() -> Result<Args> {
             "--dump" => { args.dump = Some(PathBuf::from(next(i)?)); i += 1; }
             "--open" => args.open = Some(true),
             "--no-browser" => args.open = Some(false),
+            "--no-serve" => args.no_serve = true,
             "--roi" => { args.roi = Some(parse_roi(&a, i)?); i += 4; }
             "--rough-roi" => { args.rough = Some(parse_roi(&a, i)?); i += 4; }
             "-h" | "--help" => {
-                println!("usage:\n  studio-rs --add (--snip | --image FILE [--select])   (add new objects to an existing profile)\n  studio-rs --snip [--monitor N]\n  studio-rs --image FILE --select\n  studio-rs --image FILE [--rough-roi X Y W H | --roi X Y W H]\n\ncommon: [--templates DIR] [--profile FILE] [--preview FILE] [--screenshot FILE] [--dump FILE] [--open | --no-browser]");
+                println!("usage:\n  studio-rs --add (--snip | --image FILE [--select])   (add new objects to an existing profile)\n  studio-rs --snip [--monitor N]\n  studio-rs --image FILE --select\n  studio-rs --image FILE [--rough-roi X Y W H | --roi X Y W H]\n\ncommon: [--templates DIR] [--profile FILE] [--preview FILE] [--screenshot FILE] [--dump FILE] [--open | --no-browser] [--no-serve]");
                 std::process::exit(0);
             }
             other => bail!("unknown argument: {other}"),
         }
         i += 1;
     }
-    if !args.snip && !args.reroi && !args.selftest && args.image.is_none() {
-        menu(&mut args)?;
-    }
+    args.interactive = !args.snip && !args.reroi && !args.settings && !args.selftest && args.image.is_none();
     Ok(args)
 }
 
 /// Interactive mode picker (used when the exe is started without arguments).
-fn menu(args: &mut Args) -> Result<()> {
+/// Fills `args` with the chosen mode; Ok(false) = the user chose to quit.
+fn menu(args: &mut Args) -> Result<bool> {
     println!("{}", "=".repeat(60));
     println!("       LianLianKan Studio 盤面分析與特徵建模工具");
     println!("{}", "=".repeat(60));
     println!("請選擇分析模式：");
     println!("  [1] 螢幕框選截圖 (滑鼠手動框選棋盤，框選範圍超出棋盤勿大於 1 個磚塊)");
-    println!("  [2] 讀取現有截圖檔案 (支援拖曳圖片，並手動框選棋盤)");
-    println!("  [3] 追加截圖 (新關卡出現新物件時，把新物件補進現有模板庫)");
-    println!("  [4] 調整既有 profile 的框選區域 (遊戲視窗移動／縮放後，重新對準 ROI)");
+    println!("  [2] 追加截圖 (新關卡出現新物件時，從螢幕框選，把新物件補進現有模板庫)");
+    println!("  [3] 調整既有 profile 的框選區域 (遊戲視窗移動／縮放後，重新對準 ROI)");
+    println!("  [4] 開啟設定頁面 (編輯既有 profile 的時間／辨識／規則設定，不需截圖)");
+    println!("  [0] 離開");
+    println!("  （讀取截圖檔案請改用命令列：studio --image FILE --select）");
     println!("{}", "=".repeat(60));
-    print!("請選擇模式 [1/2/3/4] (預設 1): ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    let choice = line.trim().to_string();
-    if choice == "4" {
-        args.reroi = true;
-        return Ok(());
-    }
-    if choice == "3" {
-        args.add = true;
-        println!("新截圖來源：  [1] 螢幕框選   [2] 讀取截圖檔案");
-        print!("請選擇 [1/2] (預設 1): ");
+    loop {
+        print!("請選擇模式 [0/1/2/3/4] (預設 1): ");
         std::io::stdout().flush().ok();
-        let mut l2 = String::new();
-        std::io::stdin().read_line(&mut l2)?;
-        if l2.trim() != "2" {
-            args.snip = true;
-            return Ok(());
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line)? == 0 {
+            return Ok(false); // stdin closed
         }
-    }
-    if choice == "2" || choice == "3" {
-        loop {
-            print!("請輸入或拖曳圖片路徑: ");
-            std::io::stdout().flush().ok();
-            let mut p = String::new();
-            if std::io::stdin().read_line(&mut p)? == 0 {
-                bail!("input closed");
+        match line.trim() {
+            "" | "1" => args.snip = true,
+            "2" => {
+                args.add = true;
+                args.snip = true;
             }
-            let p = p.trim().trim_matches('"').trim_matches('\'').to_string();
-            if Path::new(&p).is_file() {
-                args.image = Some(PathBuf::from(p));
-                args.select = true;
-                return Ok(());
+            "3" => args.reroi = true,
+            "4" => args.settings = true,
+            "0" | "q" | "Q" => return Ok(false),
+            other => {
+                println!("[錯誤] 無效的選項: {other}");
+                continue;
             }
-            println!("[錯誤] 找不到檔案: {p}，請重新輸入！");
         }
+        return Ok(true);
     }
-    args.snip = true;
-    Ok(())
 }
 
 fn open_in_browser(path: &Path) {
@@ -247,6 +242,13 @@ fn process_board(board: &Image, profile_roi: Roi, args: &Args) -> Result<()> {
 fn finish(args: &Args, interactive: bool) {
     let open = args.open.unwrap_or(interactive);
     if open {
+        if !args.no_serve {
+            let cfg = serve::Cfg { preview: args.preview.clone(), profile: args.profile.clone(), templates: args.templates.clone() };
+            match serve::serve(&cfg) {
+                Ok(_) => return,
+                Err(e) => println!("[Preview] 無法啟動編輯伺服器 ({e})，改為直接開啟檔案（儲存需用下載按鈕）。"),
+            }
+        }
         println!("[Preview] 開啟編輯頁面: {:?}", args.preview);
         open_in_browser(&args.preview);
     }
@@ -274,6 +276,19 @@ fn choose_monitor(args: &Args, mons: &[capture::Monitor], default_idx: usize) ->
     Ok(mons[0].clone())
 }
 
+/// Shared by every flow (screen snip, image file, re-aim): shows `img` in the selection window and
+/// returns the rough rectangle in `img` pixels, or None if cancelled / too small.
+fn pick_rough_roi(img: &Image, title: &str, place: &select::Placement, initial: Option<Roi>) -> Result<Option<Roi>> {
+    Ok(select::select_roi(img, title, place, initial)?.filter(|r| r.w > 20 && r.h > 20))
+}
+
+/// Shared by the screen and image flows: snap the rough rectangle to the board's grid lattice
+/// and cut the board out. Returns (board crop, ROI in `img` pixels).
+fn refine_and_crop(img: &Image, rough: Roi) -> (Image, Roi) {
+    let roi = refine_board_roi(img, rough);
+    (img.crop(roi.x as usize, roi.y as usize, roi.w as usize, roi.h as usize), roi)
+}
+
 /// Live screen capture + mouse selection. Returns (board crop, board rect in virtual-desktop px).
 fn pick_board_from_screen(args: &Args) -> Result<Option<(Image, Roi)>> {
     println!("{}", "=".repeat(60));
@@ -289,18 +304,14 @@ fn pick_board_from_screen(args: &Args) -> Result<Option<(Image, Roi)>> {
 
     print_selection_help();
     let place = select::Placement { at: Some((mon.x as isize, mon.y as isize)), size: (mon.w as usize, mon.h as usize), borderless: true };
-    let rough = match select::select_roi(&screen, "Screen Snip - drag to select the board, Enter = OK, Esc = cancel", &place, None)? {
-        Some(r) if r.w > 20 && r.h > 20 => r,
-        _ => {
-            println!("[取消] 未手動框選棋盤，已結束。");
-            return Ok(None);
-        }
+    let Some(rough) = pick_rough_roi(&screen, "Screen Snip - drag to select the board, Enter = OK, Esc = cancel", &place, None)? else {
+        println!("[取消] 未手動框選棋盤，已結束。");
+        return Ok(None);
     };
     println!("[手動框選] 取得大略範圍: X={}, Y={}, 寬={}, 高={}", rough.x, rough.y, rough.w, rough.h);
-    let roi = refine_board_roi(&screen, rough);
+    let (board, roi) = refine_and_crop(&screen, rough);
     println!("[網格對齊] 已自動校準至物理網格晶格: X={}, Y={}, 寬={}, 高={}", roi.x, roi.y, roi.w, roi.h);
 
-    let board = screen.crop(roi.x as usize, roi.y as usize, roi.w as usize, roi.h as usize);
     std::fs::write(&args.screenshot, export::png_bytes(&board))?;
     println!("[儲存] 已將盤面截圖存至: {:?}", args.screenshot);
     let phys = Roi { x: mon.x as i64 + roi.x, y: mon.y as i64 + roi.y, w: roi.w, h: roi.h };
@@ -314,8 +325,9 @@ fn pick_board_from_image(args: &Args) -> Result<Option<(Image, Roi)>> {
     let img = Image::from_rgb(&image::open(path).with_context(|| format!("cannot read {path:?}"))?.to_rgb8());
     println!("[1/6] Loaded image: {:?} (W={}, H={})", path, img.w, img.h);
 
-    let roi = if let Some(r) = args.roi {
-        r
+    let (board, roi) = if let Some(r) = args.roi {
+        // exact ROI given: no snapping
+        (img.crop(r.x as usize, r.y as usize, r.w as usize, r.h as usize), r)
     } else {
         let rough = if args.select {
             print_selection_help();
@@ -325,23 +337,19 @@ fn pick_board_from_image(args: &Args) -> Result<Option<(Image, Roi)>> {
             let sc = (mw * 0.9 / img.w as f64).min(mh * 0.9 / img.h as f64).min(1.0);
             let size = (((img.w as f64 * sc) as usize).max(100), ((img.h as f64 * sc) as usize).max(100));
             let place = select::Placement { at: None, size, borderless: false };
-            match select::select_roi(&img, "Select Board ROI - drag, Enter = OK, Esc = cancel", &place, None)? {
-                Some(r) if r.w > 20 && r.h > 20 => {
-                    println!("[ROI 手動框選] 取得大略範圍: X={}, Y={}, W={}, H={}", r.x, r.y, r.w, r.h);
-                    r
-                }
-                _ => {
-                    println!("[取消] 未手動框選棋盤。");
-                    return Ok(None);
-                }
-            }
+            let Some(r) = pick_rough_roi(&img, "Select Board ROI - drag, Enter = OK, Esc = cancel", &place, None)? else {
+                println!("[取消] 未手動框選棋盤。");
+                return Ok(None);
+            };
+            println!("[ROI 手動框選] 取得大略範圍: X={}, Y={}, W={}, H={}", r.x, r.y, r.w, r.h);
+            r
         } else {
             args.rough.unwrap_or(Roi { x: 0, y: 0, w: img.w as i64, h: img.h as i64 })
         };
-        refine_board_roi(&img, rough)
+        refine_and_crop(&img, rough)
     };
     println!("[2/6] Board ROI: X={}, Y={}, W={}, H={}", roi.x, roi.y, roi.w, roi.h);
-    Ok(Some((img.crop(roi.x as usize, roi.y as usize, roi.w as usize, roi.h as usize), roi)))
+    Ok(Some((board, roi)))
 }
 
 /// Rescale every template image in `dir` by (fx, fy). Returns how many files were rewritten.
@@ -423,12 +431,9 @@ fn run_reroi(args: &Args) -> Result<()> {
         size: (mon.w as usize, mon.h as usize),
         borderless: true,
     };
-    let rough = match select::select_roi(&screen, "Re-aim ROI - move / resize roughly, Enter = OK, Esc = cancel", &place, Some(initial))? {
-        Some(r) if r.w > 20 && r.h > 20 => r,
-        _ => {
-            println!("[取消] 未更動 profile。");
-            return Ok(());
-        }
+    let Some(rough) = pick_rough_roi(&screen, "Re-aim ROI - move / resize roughly, Enter = OK, Esc = cancel", &place, Some(initial))? else {
+        println!("[取消] 未更動 profile。");
+        return Ok(());
     };
     println!("[大略範圍] X={}, Y={}, W={}, H={}", rough.x, rough.y, rough.w, rough.h);
 
@@ -515,6 +520,35 @@ fn run_reroi(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// Open the settings page for the existing profile (timing / matcher / rules) in the editor server.
+fn run_settings(args: &Args) -> Result<()> {
+    println!("{}", "=".repeat(60));
+    println!("      [設定頁面（時間／辨識／規則）]");
+    println!("{}", "=".repeat(60));
+    if !args.profile.is_file() {
+        bail!("找不到既有設定檔 {:?}。請先用螢幕框選建立第一份 profile。", args.profile);
+    }
+    let prof: serde_json::Value = serde_json::from_slice(&std::fs::read(&args.profile)?).with_context(|| format!("{:?} 不是有效的 JSON", args.profile))?;
+    // its own file: must not overwrite (or trigger a reload of) the board editor's preview.html
+    let page = args.preview.with_file_name("settings_preview.html");
+    // class list (images, merges, obstacles) rebuilt from the profile + template files
+    let pdir = args.profile.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let tdir = {
+        let rel = prof["matcher"]["template_dir"].as_str().unwrap_or("templates").to_string();
+        let cand = pdir.join(&rel);
+        if cand.is_dir() { cand } else { args.templates.clone() }
+    };
+    let (tpls, merge, obstacle, generic) = augment::editor_classes(&prof, &pdir, &tdir);
+    export::write_settings_html(&prof, tpls, merge, obstacle, generic, &page)?;
+    let cfg = serve::Cfg { preview: page.clone(), profile: args.profile.clone(), templates: args.templates.clone() };
+    let res = serve::serve(&cfg);
+    // the page is a throw-away: remove it when this run's server stops (not if another server still uses it)
+    if !matches!(res, Ok(false)) {
+        let _ = std::fs::remove_file(&page);
+    }
+    res.map(|_| ())
+}
+
 fn run_snip(args: &Args) -> Result<()> {
     if let Some((board, phys)) = pick_board_from_screen(args)? {
         process_board(&board, phys, args)?;
@@ -594,11 +628,54 @@ fn wait_for_enter() {
 }
 
 fn run() -> Result<()> {
-    let args = parse_args()?;
+    let base = parse_args()?;
+    if !base.interactive {
+        return run_mode(&base);
+    }
+    // menu mode: after every action (including the editor server stopping with Enter) come back to the menu
+    use std::sync::atomic::Ordering;
+    loop {
+        clear_screen();
+        let mut args = base.clone();
+        if !menu(&mut args)? {
+            std::process::exit(0); // the user chose to quit: no extra "press Enter" pause
+        }
+        serve::STOPPED_BY_ENTER.store(false, Ordering::SeqCst);
+        let failed = match run_mode(&args) {
+            Ok(()) => false,
+            Err(e) => {
+                eprintln!("\n[錯誤] {e:#}");
+                true
+            }
+        };
+        // The editor server already waited for Enter. Anything else (errors, cancel, re-aim summary,
+        // warnings) would be wiped by the clear, so let the user read it first.
+        if failed || !serve::STOPPED_BY_ENTER.load(Ordering::SeqCst) {
+            print!("\n按 [Enter] 回到主選單...");
+            std::io::stdout().flush().ok();
+            let mut l = String::new();
+            if std::io::stdin().read_line(&mut l)? == 0 {
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Wipe the console so a long session does not pile up output (no-op when output is redirected).
+fn clear_screen() {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        let _ = std::process::Command::new("cmd").args(["/C", "cls"]).status();
+    }
+}
+
+fn run_mode(args: &Args) -> Result<()> {
     if args.selftest {
         return self_test_window();
     }
-    if args.reroi {
+    if args.settings {
+        run_settings(args)
+    } else if args.reroi {
         run_reroi(&args)
     } else if args.add {
         run_add(&args)

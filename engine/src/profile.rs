@@ -88,6 +88,36 @@ impl Default for RulesConfig {
     }
 }
 
+/// One entry of the studio's `tile_mapping`.
+///  - `type: "matchable"`: a tile class. `files` lists every sample of the class (merged classes have
+///    several); without `files` the single `file` is used.
+///  - `type: "obstacle"`: an obstacle sample (id -1 = generic, id > 0 = an extra obstacle class).
+///  - `type: "empty"`: blank-ground sample.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TileEntry {
+    #[serde(default)]
+    pub id: i32,
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub merged_from: Vec<i32>,
+}
+
+impl TileEntry {
+    /// All sample files of this entry.
+    pub fn sample_files(&self) -> Vec<&str> {
+        if self.files.is_empty() {
+            if self.file.is_empty() { vec![] } else { vec![self.file.as_str()] }
+        } else {
+            self.files.iter().map(String::as_str).collect()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameProfile {
     pub name: String,
@@ -98,6 +128,10 @@ pub struct GameProfile {
     pub timing: TimingConfig,
     #[serde(default)]
     pub rules: RulesConfig,
+    /// Class list written by studio. Empty for hand-made profiles: templates are then scanned from
+    /// the template folder by file name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tile_mapping: Vec<TileEntry>,
 }
 
 impl Default for MatcherProfile {
